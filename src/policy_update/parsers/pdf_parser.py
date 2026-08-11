@@ -20,16 +20,12 @@ from .base_parser import (
 )
 from .parser_exceptions import CorruptedFile, FileTooLarge, OCRFailed, PasswordProtectedFile
 
-MAX_PDF_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
-
-# OCR confidence threshold
-OCR_LOW_CONFIDENCE_THRESHOLD = 60.0
-
-OCR_RENDER_DPI = 300
-
-# Tolerance (points) when grouping "chars" on the same line along the y-axis
-LINE_Y_TOLERANCE = 3.0
-
+from .config import (
+    LINE_Y_TOLERANCE,
+    MAX_PDF_SIZE_BYTES,
+    OCR_LOW_CONFIDENCE_THRESHOLD,
+    OCR_RENDER_DPI,
+)
 
 # Level-1 heading
 _RE_HEADING_DIEU = re.compile(r"^\s*Điều\s+\d+\b", re.IGNORECASE)
