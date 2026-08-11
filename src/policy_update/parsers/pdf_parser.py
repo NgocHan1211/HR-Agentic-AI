@@ -20,7 +20,7 @@ from .base_parser import (
 )
 from .parser_exceptions import CorruptedFile, FileTooLarge, OCRFailed, PasswordProtectedFile
 
-from .config import (
+from ...config import (
     LINE_Y_TOLERANCE,
     MAX_PDF_SIZE_BYTES,
     OCR_LOW_CONFIDENCE_THRESHOLD,
