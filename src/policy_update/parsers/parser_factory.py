@@ -15,10 +15,27 @@ from .parser_exceptions import UnsupportedFileType
 # overlap.
 
 
+# Initialize parsers list with always-available DocxParser
+_parsers = [DocxParser]
+
+# Try to load optional parsers
+try:
+    from .pdf_parser import PdfParser
+    _parsers.append(PdfParser)
+except (ImportError, ModuleNotFoundError):
+    pass
+
+try:
+    from .text_parser import TextParser
+    _parsers.append(TextParser)
+except (ImportError, ModuleNotFoundError):
+    pass
+
+
 class ParserFactory:
     """Factory for selecting the appropriate parser based on request metadata."""
 
-    _parsers: list[type[BaseParser]] = [DocxParser]
+    _parsers: list[type[BaseParser]] = _parsers
 
     @classmethod
     def register(cls, parser_cls: type[BaseParser], *, prepend: bool = False) -> None:

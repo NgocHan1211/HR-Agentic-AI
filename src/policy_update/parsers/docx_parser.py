@@ -31,7 +31,6 @@ class DocxParser(BaseParser):
     supported_mime_types = frozenset(
         {
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "application/msword",
         }
     )
     supported_roles = frozenset(
@@ -128,7 +127,7 @@ class DocxParser(BaseParser):
                                 table_index=table_index,
                                 row=row_index,
                             ),
-                            metadata={"source": "docx", "cell_count": len(cell_texts)},
+                            metadata={"source": "docx", "cell_count": len(cell_texts), "cells": cell_texts},
                         )
                     )
                     order += 1
@@ -160,7 +159,7 @@ class DocxParser(BaseParser):
             elif node.tag == f"{_W}tab":
                 parts.append("\t")
             elif node.tag in (f"{_W}br", f"{_W}cr"):
-                parts.append(" ")
+                parts.append("\n")
         return "".join(parts)
 
     @classmethod
