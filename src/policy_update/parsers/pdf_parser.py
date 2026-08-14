@@ -76,9 +76,7 @@ class _PendingItem:
     Produced by `_collect_table_items` / `_collect_text_items` /
     `_collect_ocr_items`, gathered together and sorted by `top` (vertical
     coordinate on the page, in points) in `_process_page`, then "finalized"
-    into a real `ContentBlock` in `_finalize_items` — see the docstring of
-    `_process_page` for why this must be split into 2 steps instead of
-    assigning order right at extraction time.
+    into a real `ContentBlock` in `_finalize_items`.
 
     Attributes:
         top: vertical coordinate (point, PDF coordinate system) used to sort
@@ -88,14 +86,17 @@ class _PendingItem:
         raw_text: original text, not yet truly normalized.
         metadata: free-form dict — e.g. heading_level, ocr_lang,
             ocr_confidence, cells (for TABLE_ROW).
-        table_index: only set when block_type=TABLE_ROW, used to write into
-            SourceLocation.table_index.
-        row: only set when block_type=TABLE_ROW, the row's order within the
-            table (used to write into SourceLocation.row).
-        is_heading: True if this item is a heading — tells `_finalize_items`
-            it needs to push heading_label onto section_stack.
-        heading_label: shortened label of the heading (see `_heading_key`),
-            only has a value when is_heading=True.
+        table_index: only set when block_type=TABLE_ROW.
+        row: only set when block_type=TABLE_ROW.
+        is_heading: True if this item is a heading.
+        heading_label: shortened label of the heading, only set when
+            is_heading=True.
+        heading_level: level of the heading (1 = Điều/Chương/Mục/Phần, 2 =
+            "X.Y", 3 = "X.Y.Z", ...) — used by `_finalize_items` to know how
+            many levels to pop off section_stack before pushing this heading,
+            so sibling headings (e.g. "1.2" after "1.1") don't get nested
+            under each other instead of replacing them. Only meaningful when
+            is_heading=True.
     """
 
     top: float
@@ -106,6 +107,7 @@ class _PendingItem:
     row: int | None = None
     is_heading: bool = False
     heading_label: str | None = None
+    heading_level: int | None = None
 
 
 class PDFParser(BaseParser):
@@ -132,7 +134,7 @@ class PDFParser(BaseParser):
         blocks: list[ContentBlock] = []
         warnings: list[ParseWarning] = []
         order = _OrderCounter()
-        section_stack: list[str] = []
+        section_stack: list[tuple[int, str]] = []
         table_counter = _OrderCounter()
 
         try:
@@ -208,7 +210,7 @@ class PDFParser(BaseParser):
         page_number: int,
         request: ParseRequest,
         order: _OrderCounter,
-        section_stack: list[str],
+        section_stack: list[tuple[int, str]],
         table_counter: _OrderCounter,
     ) -> tuple[list[ContentBlock], list[ParseWarning]]:
         warnings: list[ParseWarning] = []
@@ -389,6 +391,7 @@ class PDFParser(BaseParser):
                         metadata={"heading_level": self._heading_level(raw_line)},
                         is_heading=True,
                         heading_label=_heading_key(raw_line),
+                        heading_level=self._heading_level(raw_line),
                     )
                 )
             elif block_type == BlockType.LIST_ITEM:
@@ -523,6 +526,7 @@ class PDFParser(BaseParser):
                         metadata={"heading_level": self._heading_level(line_text), "ocr_lang": lang, "ocr_confidence": line_conf},
                         is_heading=True,
                         heading_label=_heading_key(line_text),
+                        heading_level=self._heading_level(line_text),
                     )
                 )
             elif block_type == BlockType.LIST_ITEM:
@@ -574,13 +578,18 @@ class PDFParser(BaseParser):
         items: list[_PendingItem],
         page_number: int,
         order: _OrderCounter,
-        section_stack: list[str],
+        section_stack: list[tuple[int, str]],
     ) -> list[ContentBlock]:
         blocks: list[ContentBlock] = []
         for item in sorted(items, key=lambda it: it.top):
-            section_path_for_block = list(section_stack)
             if item.is_heading and item.heading_label:
-                section_stack.append(item.heading_label)
+                level = item.heading_level if item.heading_level is not None else 1
+                while section_stack and section_stack[-1][0] >= level:
+                    section_stack.pop()
+                section_path_for_block = [lbl for _, lbl in section_stack]
+                section_stack.append((level, item.heading_label))
+            else:
+                section_path_for_block = [lbl for _, lbl in section_stack]
 
             block_order = order.next()
             loc_kwargs: dict = {"page": page_number, "section_path": section_path_for_block}
