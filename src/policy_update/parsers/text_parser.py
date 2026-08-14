@@ -16,7 +16,7 @@ from .base_parser import (
     SourceLocation,
     SourceRef,
 )
-from .parser_exceptions import CorruptedFile
+from .parser_exceptions import CorruptedFile, UnsupportedFileType
 
 # Heading patterns
 _RE_HEADING_DIEU = re.compile(r"^\s*Điều\s+\d+\b", re.IGNORECASE)
@@ -36,6 +36,15 @@ def _classify_line(line: str) -> BlockType:
     if _RE_LIST_ITEM.match(stripped):
         return BlockType.LIST_ITEM
     return BlockType.PARAGRAPH
+
+
+def _heading_level(line: str) -> int:
+    stripped = line.strip()
+    if _RE_HEADING_CHUONG_MUC.match(stripped) or _RE_HEADING_DIEU.match(stripped):
+        return 1
+    if _RE_HEADING_NUMBERED.match(stripped):
+        return stripped.split()[0].count(".") + 1
+    return 2
 
 
 def _heading_key(line: str) -> str:
@@ -110,6 +119,13 @@ class TextParser(BaseParser):
         if isinstance(document_role, str):
             document_role = DocumentRole(document_role)
 
+        if document_role not in cls.supported_roles:
+            raise UnsupportedFileType(
+                message=f"{cls.parser_name} does not support document role {document_role.value!r}",
+                source_id=source_ref.source_id,
+                details={"document_role": document_role.value},
+            )
+
         parser = cls()
         blocks, warnings = parser._split_blocks(text, with_lines=False)
 
@@ -127,13 +143,12 @@ class TextParser(BaseParser):
             metadata=metadata,
         )
 
-    
     # Block splitting
     def _split_blocks(self, text: str, *, with_lines: bool) -> tuple[list[ContentBlock], list[ParseWarning]]:
         blocks: list[ContentBlock] = []
         warnings: list[ParseWarning] = []
         order = _OrderCounter()
-        section_stack: list[str] = []
+        section_stack: list[tuple[int, str]] = []
 
         lines = text.splitlines()
         if not any(line.strip() for line in lines):
@@ -171,12 +186,13 @@ class TextParser(BaseParser):
             if block_type == BlockType.HEADING:
                 _flush_paragraph(line_no - 1)
                 label = _heading_key(stripped)
+                level = _heading_level(stripped)
                 self._append_block(
                     blocks=blocks, order=order, section_stack=section_stack,
                     block_type=BlockType.HEADING, raw_text=stripped,
                     line_start=line_no if with_lines else None,
                     line_end=line_no if with_lines else None,
-                    is_heading=True, heading_label=label,
+                    is_heading=True, heading_label=label, heading_level=level,
                 )
             elif block_type == BlockType.LIST_ITEM:
                 _flush_paragraph(line_no - 1)
@@ -200,20 +216,26 @@ class TextParser(BaseParser):
         *,
         blocks: list[ContentBlock],
         order: _OrderCounter,
-        section_stack: list[str],
+        section_stack: list[tuple[int, str]],
         block_type: BlockType,
         raw_text: str,
         line_start: int | None,
         line_end: int | None,
         is_heading: bool = False,
         heading_label: str | None = None,
+        heading_level: int | None = None,
     ) -> None:
         if not raw_text.strip():
             return
 
-        section_path = list(section_stack)
         if is_heading and heading_label:
-            section_stack.append(heading_label)
+            level = heading_level if heading_level is not None else 1
+            while section_stack and section_stack[-1][0] >= level:
+                section_stack.pop()
+            section_path = [lbl for _, lbl in section_stack]  # chain của heading cha, chưa gồm chính nó
+            section_stack.append((level, heading_label))
+        else:
+            section_path = [lbl for _, lbl in section_stack]
 
         block_order = order.next()
         metadata: dict = {}
@@ -227,7 +249,7 @@ class TextParser(BaseParser):
                 block_id=f"text-{block_order:06d}",
                 block_type=block_type,
                 raw_text=raw_text,
-                normalized_text=raw_text, 
+                normalized_text=raw_text,
                 order=block_order,
                 location=SourceLocation(section_path=section_path),
                 metadata=metadata,
