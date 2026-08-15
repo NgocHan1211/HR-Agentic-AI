@@ -85,7 +85,7 @@ class ParseRequest:
         if self.size_bytes < 0:
             raise ValueError("size_bytes must be >= 0")
         
-@dataclass(frozen=True)
+@dataclass
 class SourceLocation:
     """
     Physical location of a content block inside the source document.
@@ -196,19 +196,13 @@ class BaseParser(ABC):
 
     @classmethod
     def can_parse(cls, request: ParseRequest) -> bool:
-        extension_ok = (
-            request.extension.lower()
-            in {ext.lower() for ext in cls.supported_extensions}
-        )
+        extension_ok = request.extension.lower() in {ext.lower() for ext in cls.supported_extensions}
 
         if request.declared_mime_type is None:
             mime_ok = True
         else:
             request_mime = cls._normalize_mime_type(request.declared_mime_type)
-            supported_mimes = {
-                cls._normalize_mime_type(mime)
-                for mime in cls.supported_mime_types
-            }
+            supported_mimes = (cls._normalize_mime_type(mime) for mime in cls.supported_mime_types)
             mime_ok = request_mime in supported_mimes
 
         role_ok = request.document_role in cls.supported_roles
@@ -225,6 +219,16 @@ class BaseParser(ABC):
 
         try:
             request.file_stream.seek(0)
+            # Validate actual stream content instead of relying only on request.size_bytes from the upload layer.
+            first_byte = request.file_stream.read(1)
+
+            if not first_byte:
+                raise EmptyFile(source_id=request.source_ref.source_id,)
+            
+            request.file_stream.seek(0)
+
+        except EmptyFile:
+            raise
         except (AttributeError, OSError) as exc:
             raise ParseError("File stream is not seekable", source_id=request.source_ref.source_id, cause=exc,) from exc
 
