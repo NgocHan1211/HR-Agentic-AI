@@ -46,15 +46,26 @@ def default_chunking_config() -> ChunkingConfig:
     This is the single source of truth for chunk sizing / overlap defaults —
     change the values in config.py, not here.
     """
-    from ..config import (
-        CHUNK_MAX_SIZE,
-        CHUNK_MIN_SIZE,
-        CHUNK_PRESERVE_RULES,
-        CHUNK_RESPECT_HEADING_BOUNDARIES,
-        CHUNK_OVERLAP_TYPE,
-        CHUNK_OVERLAP_CHARS,
-        CHUNK_OVERLAP_MIN_SIZE,
-    )
+    try:
+        from ..config import (
+            CHUNK_MAX_SIZE,
+            CHUNK_MIN_SIZE,
+            CHUNK_PRESERVE_RULES,
+            CHUNK_RESPECT_HEADING_BOUNDARIES,
+            CHUNK_OVERLAP_TYPE,
+            CHUNK_OVERLAP_CHARS,
+            CHUNK_OVERLAP_MIN_SIZE,
+        )
+    except ImportError:
+        from config import (
+            CHUNK_MAX_SIZE,
+            CHUNK_MIN_SIZE,
+            CHUNK_PRESERVE_RULES,
+            CHUNK_RESPECT_HEADING_BOUNDARIES,
+            CHUNK_OVERLAP_TYPE,
+            CHUNK_OVERLAP_CHARS,
+            CHUNK_OVERLAP_MIN_SIZE,
+        )
 
     return ChunkingConfig(
         max_chunk_size=CHUNK_MAX_SIZE,

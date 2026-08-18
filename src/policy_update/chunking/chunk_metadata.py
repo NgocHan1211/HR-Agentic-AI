@@ -41,25 +41,6 @@ class HeadingContext:
 class Chunk:
     """
     A chunk is a meaningful segment of parsed document content.
-
-    Chunks are created from ContentBlocks, respecting document structure
-    (headings, sections, rules) and applying size constraints and overlap.
-
-    Attributes:
-        chunk_id: Stable, deterministic identifier
-        source_ref: Reference to the source document
-        text: The actual text content of the chunk (pure block content —
-            used for citation/highlighting, does NOT include overlap)
-        block_ids: List of ContentBlock IDs that contribute to this chunk (in original order)
-        location: Physical location in the source document
-        heading_context: Heading hierarchy this chunk belongs to
-        block_types: Types of blocks included in this chunk
-        char_count: Number of characters in `text`
-        order: Position of this chunk in the document (0-indexed)
-        metadata: Additional metadata (page numbers, etc.)
-        created_at: Timestamp when chunk was created
-        overlap_text: Text from previous chunk for overlap (MVP: character-based)
-        overlap_char_count: Number of overlapping characters
     """
 
     chunk_id: str
@@ -107,26 +88,10 @@ class Chunk:
         text: str,
         order: int
     ) -> str:
-        """
-        Generate a stable, deterministic chunk ID.
-
-        Uses source_id, block_ids (in original order), text content hash, and order to ensure
-        the same chunk always gets the same ID.
-
-        Args:
-            source_id: The source document ID
-            block_ids: List of block IDs in this chunk (order preserved)
-            text: The chunk text content
-            order: The order of this chunk in the document
-
-        Returns:
-            Stable chunk ID (hex string)
-        """
-        # Create deterministic input, preserving block_ids order
+        """Generate a stable, deterministic chunk ID."""
         blocks_str = "|".join(block_ids)
         text_hash = hashlib.md5(text.encode()).hexdigest()[:8]
 
-        # Combine inputs and hash
         combined = f"{source_id}:{blocks_str}:{text_hash}:{order}"
         chunk_hash = hashlib.sha256(combined.encode()).hexdigest()[:16]
 
@@ -139,14 +104,7 @@ class Chunk:
     def get_embedding_text(self) -> str:
         """
         Text to feed into the embedding model.
-
-        Prepends the overlap context (if any) to the chunk's own text so the
-        embedding captures continuity across chunk boundaries. `text` and
-        `char_count` are kept as pure block content (no overlap) so citation
-        / highlighting always maps back exactly to the source blocks.
-
-        The embedding/indexing pipeline should call this method instead of
-        reading `chunk.text` directly.
+        Prepends overlap_text with explicit '\\n' separator to prevent word joining.
         """
         if self.overlap_text:
             return f"{self.overlap_text}\n{self.text}"
