@@ -129,6 +129,17 @@ class _ChunkBuilder:
         """Get block IDs."""
         return [b.block_id for b in self.blocks]
 
+    def get_root_block_ids(self) -> list[str]:
+        """Get root block IDs, preserving the original document block lineage."""
+        roots: list[str] = []
+        seen: set[str] = set()
+        for block in self.blocks:
+            root_id = block.metadata.get("root_block_id") or block.block_id
+            if root_id not in seen:
+                roots.append(root_id)
+                seen.add(root_id)
+        return roots
+
     def get_block_types(self) -> list[BlockType]:
         """Get block types."""
         return [b.block_type for b in self.blocks]
@@ -207,6 +218,11 @@ class StructureChunker:
                     start = end
                     continue
 
+                block_metadata = block.metadata.copy()
+                block_metadata["root_block_id"] = block.block_id
+                block_metadata["parent_block_id"] = block.block_id
+                block_metadata["split_index"] = sub_id
+
                 sub_blocks.append(
                     ContentBlock(
                         block_id=f"{block.block_id}_sub_{sub_id}",
@@ -215,7 +231,7 @@ class StructureChunker:
                         normalized_text=slice_text,
                         order=block.order + sub_id,
                         location=block.location,
-                        metadata=block.metadata.copy(),
+                        metadata=block_metadata,
                     )
                 )
                 sub_id += 1
@@ -337,6 +353,7 @@ class StructureChunker:
         order: int
     ) -> Chunk:
         block_ids = builder.get_block_ids()
+        root_block_ids = builder.get_root_block_ids()
         text = builder.get_text()
 
         chunk_id = Chunk.generate_chunk_id(
@@ -351,6 +368,7 @@ class StructureChunker:
             source_ref=source_ref,
             text=text,
             block_ids=block_ids,
+            root_block_ids=root_block_ids,
             location=builder.get_location(),
             heading_context=heading_context,
             block_types=builder.get_block_types(),

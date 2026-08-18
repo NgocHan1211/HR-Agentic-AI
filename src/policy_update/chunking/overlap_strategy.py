@@ -97,6 +97,7 @@ class CharacterOverlapStrategy(OverlapStrategy):
             source_ref=current_chunk.source_ref,
             text=current_chunk.text,
             block_ids=current_chunk.block_ids,
+            root_block_ids=getattr(current_chunk, "root_block_ids", list(dict.fromkeys(current_chunk.block_ids))),
             location=current_chunk.location,
             heading_context=current_chunk.heading_context,
             block_types=current_chunk.block_types,

@@ -277,6 +277,8 @@ def test_oversized_single_block_is_split():
 
     assert len(batch.chunks) > 1
     assert sum(len(chunk.text) for chunk in batch.chunks) >= len(long_text)
+    assert all(chunk.root_block_ids == ["p_long"] for chunk in batch.chunks)
+    assert batch.get_coverage() == (1, 1)
 
 
 def test_document_without_headings_still_chunks():

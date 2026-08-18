@@ -52,6 +52,7 @@ class Chunk:
     block_types: list[BlockType]
     char_count: int
     order: int
+    root_block_ids: list[str] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     overlap_text: str = ""
@@ -67,6 +68,9 @@ class Chunk:
 
         if not self.block_ids:
             raise ValueError("block_ids must not be empty")
+
+        if not self.root_block_ids:
+            object.__setattr__(self, "root_block_ids", list(dict.fromkeys(self.block_ids)))
 
         if self.char_count != len(self.text):
             raise ValueError(
@@ -132,11 +136,15 @@ class ChunkBatch:
             raise ValueError("ChunkBatch must contain at least one chunk")
 
     def get_coverage(self) -> tuple[int, int]:
-        """Get total blocks and unique block IDs covered by chunks."""
+        """Get total root blocks and unique root block IDs covered by chunks."""
         total = self.total_blocks
         unique_blocks = set()
         for chunk in self.chunks:
-            unique_blocks.update(chunk.block_ids)
+            root_ids = getattr(chunk, "root_block_ids", None)
+            if root_ids:
+                unique_blocks.update(root_ids)
+            else:
+                unique_blocks.update(chunk.block_ids)
 
         return len(unique_blocks), total
 
