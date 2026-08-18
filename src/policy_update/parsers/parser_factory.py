@@ -4,6 +4,8 @@ from .base_parser import BaseParser, ParseRequest
 from .docx_parser import DocxParser
 from .parser_exceptions import UnsupportedFileType
 
+_OPTIONAL_PARSER_ERRORS: dict[str, Exception] = {}
+
 # NOTE ON ADDING NEW PARSERS (pdf, excel, log, ...):
 # Prefer calling ParserFactory.register(YourParserCls) from that parser's own
 # module (e.g. at the bottom of pdf_parser.py) rather than editing this file.
@@ -20,16 +22,16 @@ _parsers = [DocxParser]
 
 # Try to load optional parsers
 try:
-    from .pdf_parser import PdfParser
-    _parsers.append(PdfParser)
-except (ImportError, ModuleNotFoundError):
-    pass
+    from .pdf_parser import PDFParser
+    _parsers.append(PDFParser)
+except Exception as exc:  # pragma: no cover - depends on optional runtime packages
+    _OPTIONAL_PARSER_ERRORS["pdf_parser"] = exc
 
 try:
     from .text_parser import TextParser
     _parsers.append(TextParser)
-except (ImportError, ModuleNotFoundError):
-    pass
+except Exception as exc:  # pragma: no cover - depends on optional runtime packages
+    _OPTIONAL_PARSER_ERRORS["text_parser"] = exc
 
 
 class ParserFactory:

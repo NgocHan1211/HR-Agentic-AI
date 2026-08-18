@@ -46,7 +46,7 @@ def default_chunking_config() -> ChunkingConfig:
     This is the single source of truth for chunk sizing / overlap defaults —
     change the values in config.py, not here.
     """
-    from ..config import (
+    from config import (
         CHUNK_MAX_SIZE,
         CHUNK_MIN_SIZE,
         CHUNK_PRESERVE_RULES,
@@ -88,7 +88,7 @@ class _TraversalState:
         if block.block_type != BlockType.HEADING:
             return
 
-        level = block.metadata.get("level", 1)
+        level = block.metadata.get("heading_level", block.metadata.get("level", 1))
         text = block.normalized_text.strip()
 
         # Any previously tracked level deeper than (or equal to) this one is

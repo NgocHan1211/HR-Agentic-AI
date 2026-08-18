@@ -149,7 +149,7 @@ class Chunk:
         reading `chunk.text` directly.
         """
         if self.overlap_text:
-            return f"{self.overlap_text}{self.text}"
+            return f"{self.overlap_text}\n{self.text}"
         return self.text
 
     def summary(self) -> str:
