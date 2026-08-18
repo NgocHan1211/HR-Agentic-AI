@@ -85,7 +85,7 @@ class ParseRequest:
         if self.size_bytes < 0:
             raise ValueError("size_bytes must be >= 0")
         
-@dataclass(frozen=True)
+@dataclass
 class SourceLocation:
     """
     Physical location of a content block inside the source document.
@@ -189,14 +189,25 @@ class BaseParser(ABC):
     supported_extensions: ClassVar[frozenset[str]] = frozenset()
     supported_mime_types: ClassVar[frozenset[str]] = frozenset()
     supported_roles: ClassVar[frozenset[DocumentRole]] = frozenset()
+    
+    @staticmethod
+    def _normalize_mime_type(mime_type: str) -> str:
+        return mime_type.split(";", 1)[0].strip().lower()
 
     @classmethod
-    def can_parse(cls, request: ParseRequest,) -> bool:
+    def can_parse(cls, request: ParseRequest) -> bool:
         extension_ok = request.extension.lower() in {ext.lower() for ext in cls.supported_extensions}
-        mime_ok = request.declared_mime_type is None or request.declared_mime_type.lower() in { mime.lower() for mime in cls.supported_mime_types}
+
+        if request.declared_mime_type is None:
+            mime_ok = True
+        else:
+            request_mime = cls._normalize_mime_type(request.declared_mime_type)
+            supported_mimes = (cls._normalize_mime_type(mime) for mime in cls.supported_mime_types)
+            mime_ok = request_mime in supported_mimes
+
         role_ok = request.document_role in cls.supported_roles
-        
-        return (extension_ok and mime_ok and role_ok)
+
+        return extension_ok and mime_ok and role_ok
 
     def parse(self, request: ParseRequest,) -> ParsedDocument:
         """
@@ -208,6 +219,16 @@ class BaseParser(ABC):
 
         try:
             request.file_stream.seek(0)
+            # Validate actual stream content instead of relying only on request.size_bytes from the upload layer.
+            first_byte = request.file_stream.read(1)
+
+            if not first_byte:
+                raise EmptyFile(source_id=request.source_ref.source_id,)
+            
+            request.file_stream.seek(0)
+
+        except EmptyFile:
+            raise
         except (AttributeError, OSError) as exc:
             raise ParseError("File stream is not seekable", source_id=request.source_ref.source_id, cause=exc,) from exc
 
@@ -224,10 +245,15 @@ class BaseParser(ABC):
                                       source_id=request.source_ref.source_id,
                                       details={"extension": request.extension,},)
 
-        if request.declared_mime_type is not None and request.declared_mime_type.lower() not in { mime.lower() for mime in self.supported_mime_types}:
-            raise InvalidMimeType(message=(f"Invalid MIME type: {request.declared_mime_type}"),
-                                  source_id=request.source_ref.source_id,
-                                  details={"declared_mime_type": (request.declared_mime_type),},)
+        if request.declared_mime_type is not None:
+            request_mime = self._normalize_mime_type(request.declared_mime_type)
+            supported_mimes = {self._normalize_mime_type(mime) for mime in self.supported_mime_types}
+
+            if request_mime not in supported_mimes:
+                raise InvalidMimeType(message=f"Invalid MIME type: {request.declared_mime_type}",
+                                      source_id=request.source_ref.source_id,
+                                      details={"declared_mime_type": request.declared_mime_type,
+                                               "normalized_mime_type": request_mime,},)
 
         if request.document_role not in self.supported_roles:
             raise UnsupportedFileType(message=(f"{self.parser_name} does not support document role {request.document_role.value!r}"),
