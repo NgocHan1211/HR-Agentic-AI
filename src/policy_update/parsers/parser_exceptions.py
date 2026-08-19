@@ -1,32 +1,27 @@
+# parser_exceptions.py
 from __future__ import annotations
 from typing import Any
 
 class ParserError(Exception):
-    """
-    Base exception for parser-layer failures.
-    `cause` is for internal logging/debugging only.
-    It must never be exposed directly to the API client.
-    """
-
     code = "PARSE_ERROR"
-    default_user_message = ("Không thể đọc nội dung tài liệu.")
+    default_user_message = "Không thể đọc nội dung tài liệu."
 
-    def __init__(self, 
-                 message: str | None = None, 
-                 *, 
-                 user_message: str | None = None, 
-                 source_id: str | None = None, 
-                 retryable: bool = False, 
-                 details: dict[str, Any] | None = None,
-                 cause: Exception | None = None,) -> None:
+    def __init__(
+        self, 
+        message: str | None = None, 
+        *, 
+        user_message: str | None = None, 
+        source_id: str | None = None, 
+        retryable: bool = False, 
+        details: dict[str, Any] | None = None,
+        cause: Exception | None = None,
+    ) -> None:
         self.message = message or self.default_user_message
         self.user_message = user_message or self.default_user_message
-
         self.source_id = source_id
         self.retryable = retryable
         self.details = details or {}
         self.cause = cause
-
         super().__init__(self.message)
 
 class UnsupportedFileType(ParserError):
@@ -47,7 +42,8 @@ class FileTooLarge(ParserError):
 
 class PasswordProtectedFile(ParserError):
     code = "PASSWORD_PROTECTED_FILE"
-    default_user_message = "File được bảo vệ bằng mật khẩu "
+    # Sửa lỗi thừa khoảng trắng ở cuối chuỗi
+    default_user_message = "File được bảo vệ bằng mật khẩu."
 
 class CorruptedFile(ParserError):
     code = "CORRUPTED_FILE"

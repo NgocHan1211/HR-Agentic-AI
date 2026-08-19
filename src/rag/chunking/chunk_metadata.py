@@ -41,6 +41,24 @@ class HeadingContext:
 class Chunk:
     """
     A chunk is a meaningful segment of parsed document content.
+
+    Chunks are created from ContentBlocks, respecting document structure
+    (headings, sections, rules) and applying size constraints and overlap.
+
+    Attributes:
+        chunk_id: Stable, deterministic identifier
+        source_ref: Reference to the source document
+        text: The actual text content of the chunk (pure block content —
+            used for citation/highlighting, does NOT include overlap)
+        block_ids: List of ContentBlock IDs that contribute to this chunk
+        location: Physical location in the source document
+        heading_context: Heading hierarchy this chunk belongs to
+        block_types: Types of blocks included in this chunk
+        char_count: Number of characters in `text`
+        metadata: Additional metadata (page numbers, etc.)
+        created_at: Timestamp when chunk was created
+        overlap_text: Text from previous chunk for overlap (MVP: character-based)
+        overlap_char_count: Number of overlapping characters
     """
 
     chunk_id: str
@@ -51,8 +69,6 @@ class Chunk:
     heading_context: HeadingContext
     block_types: list[BlockType]
     char_count: int
-    order: int
-    root_block_ids: list[str] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     overlap_text: str = ""
@@ -68,9 +84,6 @@ class Chunk:
 
         if not self.block_ids:
             raise ValueError("block_ids must not be empty")
-
-        if not self.root_block_ids:
-            object.__setattr__(self, "root_block_ids", list(dict.fromkeys(self.block_ids)))
 
         if self.char_count != len(self.text):
             raise ValueError(
@@ -92,10 +105,26 @@ class Chunk:
         text: str,
         order: int
     ) -> str:
-        """Generate a stable, deterministic chunk ID."""
-        blocks_str = "|".join(block_ids)
+        """
+        Generate a stable, deterministic chunk ID.
+
+        Uses source_id, block_ids, text content hash, and order to ensure
+        the same chunk always gets the same ID.
+
+        Args:
+            source_id: The source document ID
+            block_ids: List of block IDs in this chunk
+            text: The chunk text content
+            order: The order of this chunk in the document
+
+        Returns:
+            Stable chunk ID (hex string)
+        """
+        # Create deterministic input
+        blocks_str = "|".join(sorted(block_ids))
         text_hash = hashlib.md5(text.encode()).hexdigest()[:8]
 
+        # Combine inputs and hash
         combined = f"{source_id}:{blocks_str}:{text_hash}:{order}"
         chunk_hash = hashlib.sha256(combined.encode()).hexdigest()[:16]
 
@@ -108,10 +137,17 @@ class Chunk:
     def get_embedding_text(self) -> str:
         """
         Text to feed into the embedding model.
-        Prepends overlap_text with explicit '\\n' separator to prevent word joining.
+
+        Prepends the overlap context (if any) to the chunk's own text so the
+        embedding captures continuity across chunk boundaries. `text` and
+        `char_count` are kept as pure block content (no overlap) so citation
+        / highlighting always maps back exactly to the source blocks.
+
+        The embedding/indexing pipeline should call this method instead of
+        reading `chunk.text` directly.
         """
         if self.overlap_text:
-            return f"{self.overlap_text}\n{self.text}"
+            return f"{self.overlap_text}{self.text}"
         return self.text
 
     def summary(self) -> str:
@@ -136,15 +172,11 @@ class ChunkBatch:
             raise ValueError("ChunkBatch must contain at least one chunk")
 
     def get_coverage(self) -> tuple[int, int]:
-        """Get total root blocks and unique root block IDs covered by chunks."""
+        """Get total blocks and unique block IDs covered by chunks."""
         total = self.total_blocks
         unique_blocks = set()
         for chunk in self.chunks:
-            root_ids = getattr(chunk, "root_block_ids", None)
-            if root_ids:
-                unique_blocks.update(root_ids)
-            else:
-                unique_blocks.update(chunk.block_ids)
+            unique_blocks.update(chunk.block_ids)
 
         return len(unique_blocks), total
 
