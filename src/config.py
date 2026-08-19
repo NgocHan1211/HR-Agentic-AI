@@ -8,5 +8,6 @@ LINE_Y_TOLERANCE = 3.0 # Tolerance (points) when grouping "chars" on the same li
 
 # Retriever configuration
 EMBEDDING_MODEL = "BAAI/bge-m3"
+VECTOR_SIZE = 1024
 RERANKER_MODEL = "AITeamVN/Vietnamese_Reranker"
 TOP_K = 5

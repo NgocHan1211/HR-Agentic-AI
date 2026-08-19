@@ -1,36 +1,23 @@
 from qdrant_client import QdrantClient
-from qdrant_client.http import models
+from qdrant_client.models import Distance, VectorParams
 
-from ...policy_update.chunking.chunk_metadata import Chunk
-from ...policy_update.parsers.base_parser import Persistence
-from ...config import TOP_K
+from ...config import VECTOR_SIZE
 
-class QdrantStore:
-    def __init__(self, host: str, port: int, collection_name: str):
-        self.client = QdrantClient(host=host, port=port)
-        self.collection_name = collection_name
+COLLECTION_NAME = "payroll_documents"
 
-        if self.collection_name not in [c.name for c in self.client.get_collections().collections]:
-            self.client.create_collection(collection_name=self.collection_name,
-                                          vectors_config=models.VectorParams(size=768, distance="Cosine"))
+client = QdrantClient(host="localhost", port=6333)
 
-    def add(self, chunks: list[Chunk]):
-        points = []
-        for chunk in chunks:
-            if chunk.source_ref.persistence == Persistence.STORED:
-                points.append(models.PointStruct(id=chunk.chunk_id,
-                                                 vector=chunk.metadata["embedding"],
-                                                 payload={
-                                                     "text": chunk.text,
-                                                     "source_id": chunk.source_ref.source_id,
-                                                     "heading_context": [h for h in chunk.heading_context.section_path],
-                                                     "block_ids": chunk.block_ids,
-                                                     }))
-                
-        if points:
-            self.client.upsert(collection_name=self.collection_name, points=points)
+def create_collection(vector_size: int = VECTOR_SIZE):
+    collections = [c.name for c in client.get_collections().collections]
 
-    def query(self, embedding: list[float], top_k: int = TOP_K):
-        return self.client.search(collection_name=self.collection_name,
-                                  query_vector=embedding,
-                                  limit=top_k)
+    if COLLECTION_NAME not in collections:
+        client.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(
+                size=vector_size,
+                distance=Distance.DOT
+            )
+        )
+
+if __name__ == "__main__":
+    create_collection()
