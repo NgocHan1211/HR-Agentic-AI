@@ -61,11 +61,11 @@ def chunk_parsed_document(parsed_doc):
 
 
 st.title("HR Policy Parser + Chunking Test")
-st.caption("Upload DOCX / PDF / TXT để xem output parse và chunking thực tế")
+st.caption("Upload DOCX / PDF / TXT / XLSX để xem output parse và chunking thực tế")
 
 uploaded_file = st.file_uploader(
     "Chọn file để test",
-    type=["docx", "pdf", "txt"],
+    type=["docx", "pdf", "txt", "xlsx", "xlsm"],
 )
 
 if uploaded_file is not None:
@@ -101,6 +101,16 @@ if uploaded_file is not None:
         for i, block in enumerate(parsed.blocks, start=1):
             st.markdown(f"### Block {i} - {block.block_type.value}")
             st.write(block.normalized_text)
+            location = block.location
+            loc_bits = [
+                f"sheet={location.sheet}" if location.sheet else None,
+                f"row={location.row}" if location.row is not None else None,
+                f"cell_range={location.cell_range}" if location.cell_range else None,
+                f"page={location.page}" if location.page is not None else None,
+            ]
+            loc_str = ", ".join(b for b in loc_bits if b)
+            if loc_str:
+                st.caption(f"Location: {loc_str}")
             st.caption(f"Metadata: {block.metadata}")
             st.markdown("---")
 

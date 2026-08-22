@@ -33,6 +33,11 @@ try:
 except Exception as exc:  # pragma: no cover - depends on optional runtime packages
     _OPTIONAL_PARSER_ERRORS["text_parser"] = exc
 
+try:
+    from .excel_parser import ExcelParser
+    _parsers.append(ExcelParser)
+except Exception as exc:
+    _OPTIONAL_PARSER_ERRORS["excel_parser"] = exc
 
 class ParserFactory:
     """Factory for selecting the appropriate parser based on request metadata."""
