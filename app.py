@@ -1,119 +1,87 @@
-import io
+"""Interactive Streamlit demo for the deterministic payroll engine."""
+
+from __future__ import annotations
+
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
+import pandas as pd
 import streamlit as st
 
-from policy_update.chunking import ChunkingConfig, OverlapConfig, StructureChunker
-from policy_update.parsers.base_parser import (
-    DocumentRole,
-    ParseRequest,
-    Persistence,
-    SourceRef,
-)
-from policy_update.parsers.parser_factory import ParserFactory
+from payroll.anomaly_router import can_publish
+from payroll.engine import run_payroll
 
 
-st.set_page_config(page_title="Policy Parser + Chunking Test", layout="wide")
+st.set_page_config(page_title="AI Payroll Engine Demo", layout="wide")
+st.title("AI Payroll Engine — Demo")
+st.caption("Tính lương deterministic: công thức → input mapping → anomaly → publish gate.")
 
 
-def parse_uploaded_file(uploaded_file):
-    file_bytes = uploaded_file.getvalue()
-    suffix = Path(uploaded_file.name).suffix or ".txt"
-
-    request = ParseRequest(
-        source_ref=SourceRef(
-            source_id=uploaded_file.name,
-            display_name=uploaded_file.name,
-            persistence=Persistence.TEMPORARY,
-        ),
-        file_stream=io.BytesIO(file_bytes),
-        file_name=uploaded_file.name,
-        extension=suffix,
-        declared_mime_type=uploaded_file.type or None,
-        size_bytes=len(file_bytes),
-        document_role=DocumentRole.POLICY,
-        enable_ocr=True,
-        language_hint="vi",
-    )
-
-    parser = ParserFactory.create(request)
-    parsed = parser.parse(request)
-    return parsed
+def demo_formula() -> dict:
+    return {
+        "formula_id": "F-DEMO-2025-01", "company_id": "DEMO", "status": "active", "calculation_basis": "monthly",
+        "variables": [
+            {"name": "basic_rate", "source": "rate_config", "field_code": "BASIC"},
+            {"name": "attendance_allowance", "source": "rate_config", "field_code": "ATTENDANCE_ALLOWANCE"},
+            {"name": "worked", "source": "attendance", "field_code": "total_working_days"},
+            {"name": "standard", "source": "attendance", "field_code": "standard_working_days"},
+            {"name": "ot", "source": "attendance", "field_code": "ot_day_shift_150_hours"},
+        ],
+        "rules": [
+            {"output_field": "BASIC", "expression": "prorate(basic_rate, worked, standard)", "rounding": "round_down_1000"},
+            {"output_field": "ATTENDANCE_ALLOWANCE", "expression": "prorate(attendance_allowance, worked, standard)"},
+            {"output_field": "SALARY_OT_DAY_SHIFT_150", "expression": "BASIC / standard / 8 * ot * 1.5"},
+            {"output_field": "SI_EE", "expression": "BASIC * 0.08", "section": "deductions"},
+        ],
+    }
 
 
-def chunk_parsed_document(parsed_doc):
-    config = ChunkingConfig(
-        max_chunk_size=1000,
-        min_chunk_size=100,
-        preserve_rules=True,
-        respect_heading_boundaries=True,
-        overlap_config=OverlapConfig(
-            overlap_type="character",
-            overlap_chars=100,
-            min_chunk_size=50,
-        ),
-    )
-    chunker = StructureChunker(config)
-    return chunker.chunk(parsed_doc)
+with st.sidebar:
+    st.header("Dữ liệu đầu vào")
+    employee_id = st.text_input("Mã nhân viên", "DEMO-001")
+    period = st.text_input("Kỳ lương", "2025-05")
+    basic_rate = st.number_input("Lương cơ bản", min_value=0, value=4_730_000, step=100_000)
+    allowance = st.number_input("Phụ cấp chuyên cần", min_value=0, value=550_000, step=50_000)
+    worked = st.number_input("Ngày công thực tế", min_value=0.0, value=22.0, step=0.5)
+    standard = st.number_input("Ngày công chuẩn", min_value=1.0, value=26.0, step=0.5)
+    ot = st.number_input("Giờ OT 150%", min_value=0.0, value=8.0, step=1.0)
+    previous_net = st.number_input("Net kỳ trước (0 = bỏ qua)", min_value=0, value=0, step=100_000)
+    max_ot = st.number_input("Ngưỡng OT cảnh báo", min_value=0.0, value=200.0, step=1.0)
 
+employee = {"employee_id": employee_id, "company_id": "DEMO", "employee_type": "official"}
+attendance = {"period": period, "total_working_days": worked, "standard_working_days": standard, "ot_day_shift_150_hours": ot}
+company = {"company_id": "DEMO", "anomaly_threshold_percent": 20, "minimum_wage": 3_500_000, "max_ot_hours": max_ot,
+           "rate_config": [{"field_code": "BASIC", "employee_type": "official", "value": basic_rate},
+                           {"field_code": "ATTENDANCE_ALLOWANCE", "employee_type": "*", "value": allowance}]}
+history = [{"net_salary": previous_net}] if previous_net else []
 
-st.title("HR Policy Parser + Chunking Test")
-st.caption("Upload DOCX / PDF / TXT / XLSX để xem output parse và chunking thực tế")
+try:
+    result = run_payroll(employee, attendance, company, demo_formula(), history=history)
+except (ValueError, ZeroDivisionError) as exc:
+    st.error(f"Không thể tính lương: {exc}")
+    st.stop()
 
-uploaded_file = st.file_uploader(
-    "Chọn file để test",
-    type=["docx", "pdf", "txt", "xlsx", "xlsm"],
-)
+metrics = st.columns(3)
+metrics[0].metric("Gross salary", f"{result.gross_salary:,.0f} VND")
+metrics[1].metric("Deductions", f"{sum(item.amount for item in result.deductions):,.0f} VND")
+metrics[2].metric("Net salary", f"{result.net_salary:,.0f} VND")
 
-if uploaded_file is not None:
-    try:
-        with st.spinner("Đang parse file..."):
-            parsed = parse_uploaded_file(uploaded_file)
+st.subheader("Chi tiết kết quả")
+rows = ([{"Nhóm": "Thu nhập", "Mã khoản": item.field_code, "Số tiền (VND)": item.amount} for item in result.line_items]
+        + [{"Nhóm": "Khấu trừ", "Mã khoản": item.field_code, "Số tiền (VND)": item.amount} for item in result.deductions])
+st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
-        st.success(f"Parse xong: {len(parsed.blocks)} blocks")
+st.subheader("Anomaly & publish gate")
+if result.anomaly_flags:
+    st.error("Có anomaly chưa xử lý — hệ thống chặn publish payslip.")
+    st.dataframe(pd.DataFrame([flag.to_dict() for flag in result.anomaly_flags]), hide_index=True, use_container_width=True)
+else:
+    st.success("Không có anomaly — kết quả đủ điều kiện publish.")
+st.write("Trạng thái publish:", "✅ Được phép" if can_publish(result) else "⛔ Bị chặn")
 
-        if parsed.warnings:
-            st.warning("Warnings:")
-            for warning in parsed.warnings:
-                st.write(f"- {warning.code}: {warning.message}")
-
-        with st.spinner("Đang chunk nội dung..."):
-            chunk_batch = chunk_parsed_document(parsed)
-
-        st.success(f"Chunk xong: {len(chunk_batch.chunks)} chunks")
-
-        st.subheader("Preview chunking")
-        for i, chunk in enumerate(chunk_batch.chunks, start=1):
-            with st.expander(
-                f"Chunk {i} — {chunk.get_heading_path() or 'No heading'} | {chunk.char_count} chars | blocks={len(chunk.block_ids)}",
-                expanded=(i == 1),
-            ):
-                st.caption(
-                    f"Chunk ID: {chunk.chunk_id} | overlap: {chunk.overlap_char_count} chars | block types: {[b.value for b in chunk.block_types]}"
-                )
-                st.code(chunk.text, language="text")
-                st.markdown("---")
-
-        st.subheader("Raw parsed blocks")
-        for i, block in enumerate(parsed.blocks, start=1):
-            st.markdown(f"### Block {i} - {block.block_type.value}")
-            st.write(block.normalized_text)
-            location = block.location
-            loc_bits = [
-                f"sheet={location.sheet}" if location.sheet else None,
-                f"row={location.row}" if location.row is not None else None,
-                f"cell_range={location.cell_range}" if location.cell_range else None,
-                f"page={location.page}" if location.page is not None else None,
-            ]
-            loc_str = ", ".join(b for b in loc_bits if b)
-            if loc_str:
-                st.caption(f"Location: {loc_str}")
-            st.caption(f"Metadata: {block.metadata}")
-            st.markdown("---")
-
-    except Exception as exc:
-        st.error(f"Lỗi khi parse/chunk file: {exc}")
-        st.exception(exc)
+with st.expander("FormulaSpec đang chạy"):
+    st.json(demo_formula())
+with st.expander("Input snapshot (audit)"):
+    st.json(result.input_snapshot)

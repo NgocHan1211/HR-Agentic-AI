@@ -17,6 +17,9 @@ def as_mapping(value: Any) -> dict[str, Any]:
         return {}
     if isinstance(value, Mapping):
         return dict(value)
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return dict(to_dict())
     if is_dataclass(value):
         return asdict(value)
     return dict(vars(value))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import io
 from pathlib import Path
 from typing import Iterable
 
@@ -36,3 +37,22 @@ def _row(result: PayrollResult) -> dict[str, object]:
             "gross_salary": result.gross_salary, "total_deductions": sum(item.amount for item in result.deductions),
             "employer_cost": sum(item.amount for item in result.employer_cost), "net_salary": result.net_salary,
             "anomaly_codes": ", ".join(flag.code for flag in result.anomaly_flags)}
+
+
+def export_payslip(result: PayrollResult, path: str | Path) -> Path:
+    """Export one payslip to XLSX (or CSV when a CSV destination is supplied)."""
+    destination = Path(path)
+    rows = ([{"section": "income", "field_code": item.field_code, "amount": item.amount} for item in result.line_items]
+            + [{"section": "deduction", "field_code": item.field_code, "amount": -item.amount} for item in result.deductions]
+            + [{"section": "employer_cost", "field_code": item.field_code, "amount": item.amount} for item in result.employer_cost])
+    if destination.suffix.lower() != ".xlsx": return _write_csv(destination, rows)
+    try:
+        from openpyxl import Workbook
+    except ImportError as exc: raise RuntimeError("XLSX export requires openpyxl") from exc
+    workbook = Workbook(); sheet = workbook.active; sheet.title = "Payslip"
+    sheet.append(["Employee ID", result.employee_id]); sheet.append(["Period", result.period]); sheet.append([])
+    sheet.append(["Section", "Field code", "Amount (VND)"])
+    for row in rows: sheet.append([row["section"], row["field_code"], row["amount"]])
+    sheet.append([]); sheet.append(["Gross", result.gross_salary]); sheet.append(["Net", result.net_salary])
+    workbook.save(destination)
+    return destination

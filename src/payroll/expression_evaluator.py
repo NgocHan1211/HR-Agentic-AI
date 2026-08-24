@@ -1,56 +1,30 @@
-"""Safe, deterministic evaluator for payroll formula expressions.
+"""Safe, deterministic evaluator for the payroll expression DSL.
 
-Only arithmetic, comparisons, boolean operators, and explicitly registered
-functions are supported.  It deliberately never calls Python ``eval``.
+The module deliberately interprets a small AST whitelist; it never delegates
+formula execution to Python ``eval``.
 """
 
 from __future__ import annotations
 
 import ast
-import math
 import operator
 from collections.abc import Callable, Mapping
 from numbers import Real
 from typing import Any
 
+from .builtin_functions import prorate, round_down, tax_bracket_vn
 
-class ExpressionError(ValueError):
+
+class ExpressionEvaluationError(ValueError):
     """Raised when an expression is unsafe, invalid, or cannot be evaluated."""
 
 
-def prorate(amount: float, actual_days: float, standard_days: float) -> float:
-    if standard_days <= 0:
-        raise ExpressionError("standard_days must be greater than 0")
-    return amount * actual_days / standard_days
-
-
-def round_down(amount: float, unit: float) -> float:
-    if unit <= 0:
-        raise ExpressionError("round_down unit must be greater than 0")
-    return math.floor(amount / unit) * unit
-
-
-def tax_bracket_vn(taxable_income: float) -> float:
-    """Progressive PIT calculator; keep bracket data configurable in production."""
-    brackets = ((5_000_000, .05), (10_000_000, .10), (18_000_000, .15),
-                (32_000_000, .20), (52_000_000, .25), (80_000_000, .30))
-    remaining, lower, tax = max(0.0, taxable_income), 0.0, 0.0
-    for ceiling, rate in brackets:
-        portion = min(remaining, ceiling - lower)
-        tax += max(0.0, portion) * rate
-        remaining -= max(0.0, portion)
-        lower = ceiling
-        if remaining <= 0:
-            return tax
-    return tax + remaining * .35
-
+ExpressionError = ExpressionEvaluationError
 
 BUILTIN_FUNCTIONS: dict[str, Callable[..., float]] = {
-    "prorate": prorate,
-    "round_down": round_down,
-    "tax_bracket_vn": tax_bracket_vn,
+    "abs": abs, "min": min, "max": max, "round": round,
+    "prorate": prorate, "round_down": round_down, "tax_bracket_vn": tax_bracket_vn,
 }
-
 _BINARY = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
            ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod}
 _COMPARE = {ast.Eq: operator.eq, ast.NotEq: operator.ne, ast.Lt: operator.lt,
@@ -59,16 +33,16 @@ _COMPARE = {ast.Eq: operator.eq, ast.NotEq: operator.ne, ast.Lt: operator.lt,
 
 def evaluate(expression: str, variables: Mapping[str, Any], *,
              functions: Mapping[str, Callable[..., float]] | None = None) -> float | bool:
-    if not expression or not expression.strip():
-        raise ExpressionError("expression must not be empty")
+    """Evaluate only numeric/boolean variables and whitelisted function calls."""
+    if not isinstance(expression, str) or not expression.strip():
+        raise ExpressionEvaluationError("expression must be a non-empty string")
     try:
         tree = ast.parse(expression, mode="eval")
     except SyntaxError as exc:
-        raise ExpressionError(f"invalid expression syntax: {expression!r}") from exc
+        raise ExpressionEvaluationError(f"invalid expression: {exc.msg}") from exc
     if sum(1 for _ in ast.walk(tree)) > 128:
-        raise ExpressionError("expression is too complex")
-    evaluator = _Evaluator(variables, {**BUILTIN_FUNCTIONS, **(functions or {})})
-    return evaluator.visit(tree.body)
+        raise ExpressionEvaluationError("expression is too complex")
+    return _Evaluator(variables, {**BUILTIN_FUNCTIONS, **(functions or {})}).visit(tree.body)
 
 
 class _Evaluator(ast.NodeVisitor):
@@ -76,128 +50,57 @@ class _Evaluator(ast.NodeVisitor):
         self.variables, self.functions = variables, functions
 
     def generic_visit(self, node: ast.AST) -> Any:
-        raise ExpressionError(f"unsupported expression feature: {type(node).__name__}")
+        raise ExpressionEvaluationError(f"unsupported syntax: {type(node).__name__}")
 
     def visit_Constant(self, node: ast.Constant) -> float | bool:
-        if isinstance(node.value, bool):
-            return node.value
-        if isinstance(node.value, Real):
-            return float(node.value)
-        raise ExpressionError("only numeric and boolean literals are allowed")
+        if isinstance(node.value, bool): return node.value
+        if isinstance(node.value, Real): return float(node.value)
+        raise ExpressionEvaluationError("only numeric and boolean literals are allowed")
 
-    def visit_Name(self, node: ast.Name) -> Any:
+    def visit_Name(self, node: ast.Name) -> float | bool:
         if node.id not in self.variables:
-            raise ExpressionError(f"unknown variable: {node.id}")
+            raise ExpressionEvaluationError(f"missing variable: {node.id}")
         value = self.variables[node.id]
-        if isinstance(value, bool) or isinstance(value, Real):
-            return value
-        raise ExpressionError(f"variable {node.id!r} must be numeric or boolean")
+        if isinstance(value, bool) or isinstance(value, Real): return value
+        raise ExpressionEvaluationError(f"variable {node.id!r} must be numeric or boolean")
 
-    def visit_UnaryOp(self, node: ast.UnaryOp) -> Any:
+    def visit_UnaryOp(self, node: ast.UnaryOp) -> float | bool:
         value = self.visit(node.operand)
         if isinstance(node.op, ast.USub): return -value
         if isinstance(node.op, ast.UAdd): return +value
         if isinstance(node.op, ast.Not): return not value
-        raise ExpressionError("unsupported unary operator")
+        return self.generic_visit(node)
 
     def visit_BinOp(self, node: ast.BinOp) -> float:
         operation = _BINARY.get(type(node.op))
-        if operation is None:
-            raise ExpressionError("unsupported binary operator")
+        if operation is None: return self.generic_visit(node)
         try:
             return float(operation(self.visit(node.left), self.visit(node.right)))
-        except (ArithmeticError, TypeError) as exc:
-            raise ExpressionError(f"could not evaluate arithmetic operation: {exc}") from exc
+        except (ArithmeticError, TypeError, ValueError) as exc:
+            raise ExpressionEvaluationError(f"could not evaluate arithmetic operation: {exc}") from exc
 
     def visit_BoolOp(self, node: ast.BoolOp) -> bool:
-        values = [bool(self.visit(value)) for value in node.values]
-        return all(values) if isinstance(node.op, ast.And) else any(values) if isinstance(node.op, ast.Or) else self.generic_visit(node)
+        if isinstance(node.op, ast.And): return all(bool(self.visit(value)) for value in node.values)
+        if isinstance(node.op, ast.Or): return any(bool(self.visit(value)) for value in node.values)
+        return self.generic_visit(node)
 
     def visit_Compare(self, node: ast.Compare) -> bool:
         left = self.visit(node.left)
         for op, comparator in zip(node.ops, node.comparators):
-            compare = _COMPARE.get(type(op))
-            if compare is None or not compare(left, self.visit(comparator)):
-                return False
-            left = self.visit(comparator)
+            operation, right = _COMPARE.get(type(op)), self.visit(comparator)
+            if operation is None or not operation(left, right): return False
+            left = right
         return True
 
-    def visit_IfExp(self, node: ast.IfExp) -> Any:
+    def visit_IfExp(self, node: ast.IfExp) -> float | bool:
         return self.visit(node.body if self.visit(node.test) else node.orelse)
 
     def visit_Call(self, node: ast.Call) -> float:
         if not isinstance(node.func, ast.Name) or node.keywords:
-            raise ExpressionError("only positional calls to approved functions are allowed")
+            raise ExpressionEvaluationError("only positional calls to approved functions are allowed")
         function = self.functions.get(node.func.id)
-        if function is None:
-            raise ExpressionError(f"function is not allowed: {node.func.id}")
+        if function is None: raise ExpressionEvaluationError(f"function is not allowed: {node.func.id}")
         try:
             return float(function(*(self.visit(arg) for arg in node.args)))
-        except (ArithmeticError, TypeError) as exc:
-            raise ExpressionError(f"function {node.func.id} failed: {exc}") from exc
-
-from __future__ import annotations
-
-import ast
-import operator
-from typing import Any, Mapping
-
-from .builtin_functions import prorate, round_down, tax_bracket_vn
-
-
-class ExpressionEvaluationError(ValueError):
-    pass
-
-
-_BIN_OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
-            ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod,
-            ast.Pow: operator.pow}
-_CMP_OPS = {ast.Eq: operator.eq, ast.NotEq: operator.ne, ast.Lt: operator.lt,
-            ast.LtE: operator.le, ast.Gt: operator.gt, ast.GtE: operator.ge}
-_FUNCTIONS = {"abs": abs, "min": min, "max": max, "round": round,
-              "prorate": prorate, "round_down": round_down, "tax_bracket_vn": tax_bracket_vn}
-
-
-def evaluate(expression: str, variables: Mapping[str, Any]) -> Any:
-    """Evaluate a small arithmetic DSL; never executes Python code or attributes."""
-    if not isinstance(expression, str) or not expression.strip():
-        raise ExpressionEvaluationError("expression must be a non-empty string")
-    try:
-        tree = ast.parse(expression, mode="eval")
-    except SyntaxError as exc:
-        raise ExpressionEvaluationError(f"invalid expression: {exc.msg}") from exc
-    return _eval(tree.body, variables)
-
-
-def _eval(node: ast.AST, variables: Mapping[str, Any]) -> Any:
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float, bool)):
-        return node.value
-    if isinstance(node, ast.Name):
-        if node.id not in variables:
-            raise ExpressionEvaluationError(f"missing variable: {node.id}")
-        value = variables[node.id]
-        if not isinstance(value, (int, float, bool)):
-            raise ExpressionEvaluationError(f"variable {node.id} must be numeric or boolean")
-        return value
-    if isinstance(node, ast.UnaryOp) and type(node.op) in (ast.USub, ast.UAdd, ast.Not):
-        value = _eval(node.operand, variables)
-        return -value if isinstance(node.op, ast.USub) else (+value if isinstance(node.op, ast.UAdd) else not value)
-    if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
-        return _BIN_OPS[type(node.op)](_eval(node.left, variables), _eval(node.right, variables))
-    if isinstance(node, ast.Compare):
-        left = _eval(node.left, variables)
-        for operation, comparator in zip(node.ops, node.comparators):
-            if type(operation) not in _CMP_OPS or not _CMP_OPS[type(operation)](left, _eval(comparator, variables)):
-                return False
-            left = _eval(comparator, variables)
-        return True
-    if isinstance(node, ast.BoolOp) and type(node.op) in (ast.And, ast.Or):
-        values = [_eval(value, variables) for value in node.values]
-        return all(values) if isinstance(node.op, ast.And) else any(values)
-    if isinstance(node, ast.IfExp):
-        return _eval(node.body if _eval(node.test, variables) else node.orelse, variables)
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _FUNCTIONS:
-        if node.keywords:
-            raise ExpressionEvaluationError("keyword arguments are not allowed")
-        return _FUNCTIONS[node.func.id](*[_eval(arg, variables) for arg in node.args])
-    raise ExpressionEvaluationError(f"unsupported syntax: {type(node).__name__}")
+        except (ArithmeticError, TypeError, ValueError) as exc:
+            raise ExpressionEvaluationError(f"function {node.func.id} failed: {exc}") from exc
