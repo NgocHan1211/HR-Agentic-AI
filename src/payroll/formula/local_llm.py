@@ -29,13 +29,33 @@ class QwenLocalCompletionClient:
                 from transformers import AutoModelForCausalLM, AutoTokenizer
             except ImportError as exc: raise RuntimeError("install transformers, accelerate and torch") from exc
             self._tokenizer = AutoTokenizer.from_pretrained(self.model_id)
+            if self._tokenizer.pad_token_id is None:
+                # Qwen tokenizers often have no pad token; without one, generate() can
+                # behave unpredictably (including emitting an immediate EOS -> empty output).
+                self._tokenizer.pad_token = self._tokenizer.eos_token
             self._model = AutoModelForCausalLM.from_pretrained(self.model_id, torch_dtype="auto", device_map="auto")
             self._model.eval()
         inputs = self._tokenizer.apply_chat_template(self._messages(system, user), add_generation_prompt=True,
                                                       tokenize=True, return_dict=True, return_tensors="pt").to(self._model.device)
-        outputs = self._model.generate(**inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
+        outputs = self._model.generate(
+            **inputs,
+            max_new_tokens=self.max_new_tokens,
+            min_new_tokens=8,  # forbid an immediate empty/EOS-only generation
+            do_sample=False,
+            pad_token_id=self._tokenizer.pad_token_id,
+        )
         generated = outputs[0][inputs["input_ids"].shape[-1]:]
-        return self._tokenizer.decode(generated, skip_special_tokens=True).strip()
+        text = self._tokenizer.decode(generated, skip_special_tokens=True).strip()
+        if os.getenv("QWEN_DEBUG"):
+            print(f"[QwenLocalCompletionClient] generated_tokens={generated.shape[-1]} raw={text[:500]!r}")
+        if not text:
+            raise RuntimeError(
+                f"Qwen ({self.model_id}) generated an empty response "
+                f"({generated.shape[-1]} tokens decoded to nothing). "
+                "Try a larger/less-quantized model, increase QWEN_MAX_NEW_TOKENS, "
+                "or set QWEN_DEBUG=1 to inspect raw generation."
+            )
+        return text
 
     def _vllm_complete(self, system: str, user: str) -> str:
         if self._model is None:
@@ -49,5 +69,17 @@ class QwenLocalCompletionClient:
             self._tokenizer = AutoTokenizer.from_pretrained(self.model_id)
         from vllm import SamplingParams
         prompt = self._tokenizer.apply_chat_template(self._messages(system, user), tokenize=False, add_generation_prompt=True)
-        result = self._model.generate([prompt], SamplingParams(temperature=0, max_tokens=self.max_new_tokens), use_tqdm=False)
-        return result[0].outputs[0].text.strip()
+        result = self._model.generate(
+            [prompt],
+            SamplingParams(temperature=0, max_tokens=self.max_new_tokens, min_tokens=8),
+            use_tqdm=False,
+        )
+        text = result[0].outputs[0].text.strip()
+        if os.getenv("QWEN_DEBUG"):
+            print(f"[QwenLocalCompletionClient] raw={text[:500]!r}")
+        if not text:
+            raise RuntimeError(
+                f"Qwen ({self.model_id}) generated an empty response via vLLM. "
+                "Try increasing QWEN_MAX_NEW_TOKENS or set QWEN_DEBUG=1 to inspect raw generation."
+            )
+        return text

@@ -26,8 +26,11 @@ def extract_formula(document_text: str, company_id: str, evidence_locations: lis
               "[{output_field,expression,condition?,rounding?,section?,description?}]. "
               "Sources must be employee, attendance, rate_config, regulatory, or literal. "
               "Use only arithmetic and prorate, round_down, tax_bracket_vn; never calculate a salary.")
-    try: payload = json.loads(client.complete(system=system, user=document_text))
-    except (json.JSONDecodeError, OSError, RuntimeError) as exc: raise FormulaExtractionError("LLM did not return valid formula JSON") from exc
+    try:
+        raw_response = client.complete(system=system, user=document_text)
+        payload = _parse_json_response(raw_response)
+    except (json.JSONDecodeError, OSError, RuntimeError) as exc:
+        raise FormulaExtractionError(f"LLM did not return valid formula JSON: {str(exc)[:240]}") from exc
     variables = tuple(_variable_with_metadata(item) for item in payload.get("variables", []))
     rules = tuple(FormulaRule(**{key: value for key, value in item.items()
                                  if key in {"output_field", "expression", "condition", "rounding", "section", "description"}})
@@ -42,6 +45,22 @@ def extract_formula(document_text: str, company_id: str, evidence_locations: lis
 def _variable_with_metadata(item: dict[str, Any]) -> FormulaVariable:
     return FormulaVariable(name=item["name"], source=item["source"], field_code=item.get("field_code"),
                            value=item.get("value"), description=item.get("description", ""))
+
+
+def _parse_json_response(raw_response: str) -> dict[str, Any]:
+    """Accept a JSON object optionally wrapped in a Markdown code fence."""
+    text = (raw_response or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3].rstrip()
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end < start:
+        raise json.JSONDecodeError(f"no JSON object in model response {text[:160]!r}", text, 0)
+    payload = json.loads(text[start:end + 1])
+    if not isinstance(payload, dict):
+        raise json.JSONDecodeError("top-level JSON must be an object", text, 0)
+    return payload
 
 
 def formula_to_engine_dict(spec: FormulaSpec) -> dict[str, Any]:
