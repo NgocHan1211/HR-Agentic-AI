@@ -115,7 +115,10 @@ def normalize_salary_schema(raw_bundle: Mapping[str, pd.DataFrame], mapping_spec
 
 def normalize_attendance(raw_bundle: Mapping[str, pd.DataFrame], mapping_spec: SheetMappingSpec, period: str) -> list[AttendanceRecord]:
     _require_type(mapping_spec, "attendance")
-    records: list[AttendanceRecord] = []
+    # A payroll workbook often stores attendance inputs in separate sheets
+    # (night shifts, annual leave, maternity leave, overtime, ...).  Merge
+    # them into one Engine input per employee, keyed by the shared employee ID.
+    records: dict[str, dict[str, Any]] = {}
     for sheet, frame in raw_bundle.items():
         config = mapping_spec.sheets[sheet]; renamed = frame.rename(columns=dict(config.get("columns", {})))
         for row in renamed.dropna(how="all").to_dict("records"):
@@ -124,8 +127,15 @@ def normalize_attendance(raw_bundle: Mapping[str, pd.DataFrame], mapping_spec: S
             attrs = {key: _number_or_text(value) for key, value in row.items() if pd.notna(value)}
             for key, value in list(attrs.items()):
                 if key.startswith("ot_") and key.endswith("_hours"): attrs[key] = _hours(value)
-            records.append(AttendanceRecord(employee_id, period, attrs))
-    return records
+            merged = records.setdefault(employee_id, {})
+            for key, value in attrs.items():
+                if key in merged and merged[key] != value:
+                    raise ValueError(
+                        f"conflicting attendance value for {employee_id}/{key}; "
+                        "map each canonical field from only one source sheet"
+                    )
+                merged[key] = value
+    return [AttendanceRecord(employee_id, period, attrs) for employee_id, attrs in records.items()]
 
 
 def validate_ingested_data(employees: list[EmployeeMaster], attendance: list[AttendanceRecord], period: str) -> DataValidationResult:

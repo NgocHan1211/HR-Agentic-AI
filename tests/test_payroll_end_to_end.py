@@ -52,3 +52,16 @@ def test_ingestion_rejects_unknown_employee_and_llm_candidate_is_engine_compatib
     candidate = extract_formula("Lương cơ bản theo ngày công", "C1", [{"page": 1}], llm_client=FakeLLM())
     engine_formula = formula_to_engine_dict(candidate.proposed_spec)
     assert engine_formula["variables"][0]["field_code"] == "BASIC"
+
+
+def test_attendance_sheets_are_merged_by_employee_id() -> None:
+    mapping = SheetMappingSpec("C", "attendance", {
+        "NightShift": {"columns": {"employee": "employee_id", "hours": "night_shift_hours"}},
+        "Maternity": {"columns": {"employee": "employee_id", "days": "maternity_leave_days"}},
+    })
+    records = normalize_attendance({
+        "NightShift": pd.DataFrame([{"employee": "E-01", "hours": 12}]),
+        "Maternity": pd.DataFrame([{"employee": "E-01", "days": 3}]),
+    }, mapping, "2025-05")
+    assert len(records) == 1
+    assert records[0].to_dict() == {"employee_id": "E-01", "period": "2025-05", "night_shift_hours": 12.0, "maternity_leave_days": 3.0}
