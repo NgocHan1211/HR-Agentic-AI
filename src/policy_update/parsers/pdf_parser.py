@@ -1,4 +1,3 @@
-# pdf_parser.py
 from __future__ import annotations
 
 import re
@@ -34,9 +33,14 @@ _RE_HEADING_CHUONG = re.compile(r"^\s*Chương\s+[IVXLC0-9]+\b", re.IGNORECASE)
 _RE_HEADING_MUC = re.compile(r"^\s*Mục\s+[IVXLC0-9]+\b", re.IGNORECASE)
 _RE_HEADING_DIEU = re.compile(r"^\s*Điều\s+\d+\b", re.IGNORECASE)
 
-# Bổ sung loại trừ chuỗi chứa ký hiệu tiền tệ hoặc độ dài số quá lớn
-_RE_HEADING_NUMBERED = re.compile(r"^\s*\d{1,3}(?:(\.\d{1,3}){1,6}\.?|\.)\s+(?!(đ|đồng|vnd|usd)\b)\S", re.IGNORECASE)
+_RE_HEADING_NUMBERED = re.compile(
+    r"^\s*\d{1,3}(?:(\.\d{1,3}){1,6}\.?|\.)\s+(?!(đ|đồng|vnd|usd)\b)\S",
+    re.IGNORECASE,
+)
 _RE_LIST_ITEM = re.compile(r"^\s*([a-z]\)|[a-z]\.|\d+\)|\d+\.|[-•*])\s+\S")
+
+_MIN_USABLE_TEXT_LAYER_ALNUM_CHARS = 24
+_MAX_TEXT_LAYER_REPLACEMENT_CHAR_RATIO = 0.02
 
 
 def _classify_line(line: str) -> BlockType:
@@ -89,7 +93,7 @@ class _PendingItem:
 
 class PDFParser(BaseParser):
     parser_name: ClassVar[str] = "pdf_parser"
-    parser_version: ClassVar[str] = "1.0.0"
+    parser_version: ClassVar[str] = "1.1.0"
     supported_extensions: ClassVar[frozenset[str]] = frozenset({".pdf"})
     supported_mime_types: ClassVar[frozenset[str]] = frozenset({"application/pdf"})
     supported_roles: ClassVar[frozenset[DocumentRole]] = frozenset(
@@ -110,9 +114,12 @@ class PDFParser(BaseParser):
         order = _OrderCounter()
         section_stack: list[tuple[int, str]] = []
         table_counter = _OrderCounter()
+        page_count: int | None = None
 
         try:
             with pdf:
+                page_count = len(pdf.pages)
+
                 for page_index, page in enumerate(pdf.pages):
                     page_number = page_index + 1
                     page_blocks, page_warnings = self._process_page(
@@ -139,7 +146,7 @@ class PDFParser(BaseParser):
             parser_name=self.parser_name,
             parser_version=self.parser_version,
             request=request,
-            page_count=len(pdf.pages) if hasattr(pdf, "pages") else None,
+            page_count=page_count,
         )
 
         return ParsedDocument(
@@ -187,48 +194,124 @@ class PDFParser(BaseParser):
         table_counter: _OrderCounter,
     ) -> tuple[list[ContentBlock], list[ParseWarning]]:
         warnings: list[ParseWarning] = []
+
         table_items, table_warnings, table_bboxes = self._collect_table_items(
-            page=page, page_number=page_number, table_counter=table_counter
+            page=page,
+            page_number=page_number,
+            table_counter=table_counter,
         )
         warnings.extend(table_warnings)
 
         has_text_layer = bool(page.chars)
-        if has_text_layer:
-            text_items = self._collect_text_items(page=page, table_bboxes=table_bboxes)
+        text_layer_usable = self._has_usable_text_layer(page)
+        use_ocr = request.enable_ocr and not text_layer_usable
+
+        if text_layer_usable:
+            text_items = self._collect_text_items(
+                page=page,
+                table_bboxes=table_bboxes,
+            )
             pending = table_items + text_items
+
+        elif not request.enable_ocr:
+            code = (
+                "TEXT_LAYER_LOW_QUALITY_OCR_DISABLED"
+                if has_text_layer
+                else "NO_TEXT_LAYER_OCR_DISABLED"
+            )
+            message = (
+                f"Page {page_number} has a sparse or malformed text layer and OCR is disabled."
+                if has_text_layer
+                else f"Page {page_number} has no text layer and OCR is disabled."
+            )
+            warnings.append(
+                ParseWarning(
+                    code=code,
+                    message=message,
+                    location=SourceLocation(page=page_number),
+                )
+            )
+            pending = table_items
+
         else:
-            if not request.enable_ocr:
+            if has_text_layer:
                 warnings.append(
                     ParseWarning(
-                        code="NO_TEXT_LAYER_OCR_DISABLED",
-                        message=f"Page {page_number} has no text layer and OCR is disabled.",
+                        code="TEXT_LAYER_LOW_QUALITY_OCR_FALLBACK",
+                        message=(
+                            f"Page {page_number} has a sparse or malformed text layer; "
+                            "OCR was used instead."
+                        ),
                         location=SourceLocation(page=page_number),
                     )
                 )
-                pending = table_items
-            else:
-                ocr_items, ocr_warning = self._collect_ocr_items(
-                    page=page, page_number=page_number, request=request
+
+            if table_bboxes:
+                warnings.append(
+                    ParseWarning(
+                        code="OCR_TABLE_NOT_STRUCTURED",
+                        message=(
+                            f"Page {page_number} contains detected table regions. "
+                            "OCR output is text-only and must be reviewed before "
+                            "using it as structured payroll data."
+                        ),
+                        location=SourceLocation(page=page_number),
+                        details={"detected_table_count": len(table_bboxes)},
+                    )
                 )
-                if ocr_warning is not None:
-                    warnings.append(ocr_warning)
-                pending = table_items + ocr_items
+
+            ocr_items, ocr_warning = self._collect_ocr_items(
+                page=page,
+                page_number=page_number,
+                request=request,
+            )
+            if ocr_warning is not None:
+                warnings.append(ocr_warning)
+
+            pending = ocr_items
 
         blocks = self._finalize_items(
-            items=pending, page_number=page_number, order=order, section_stack=section_stack
+            items=pending,
+            page_number=page_number,
+            order=order,
+            section_stack=section_stack,
         )
         return blocks, warnings
 
+    @staticmethod
+    def _has_usable_text_layer(page) -> bool:
+        """Kiểm tra text layer có đủ chất lượng để không cần OCR hay không."""
+        chars = page.chars
+        if not chars:
+            return False
+
+        text = "".join(str(char.get("text", "")) for char in chars)
+        meaningful_chars = sum(character.isalnum() for character in text)
+        replacement_chars = text.count("\ufffd")
+
+        if meaningful_chars < _MIN_USABLE_TEXT_LAYER_ALNUM_CHARS:
+            return False
+
+        if replacement_chars / max(len(text), 1) > _MAX_TEXT_LAYER_REPLACEMENT_CHAR_RATIO:
+            return False
+
+        return True
+
     def _collect_table_items(
-        self, *, page, page_number: int, table_counter: _OrderCounter
+        self,
+        *,
+        page,
+        page_number: int,
+        table_counter: _OrderCounter,
     ) -> tuple[list[_PendingItem], list[ParseWarning], list]:
         items: list[_PendingItem] = []
         warnings: list[ParseWarning] = []
         tables = page.find_tables()
-        table_bboxes = [t.bbox for t in tables]
+        table_bboxes = [table.bbox for table in tables]
 
         for table in tables:
             table_index = table_counter.next()
+
             try:
                 rows = table.extract()
             except Exception as exc:
@@ -242,7 +325,7 @@ class PDFParser(BaseParser):
                 )
                 continue
 
-            if rows is None or len(rows) == 0:
+            if not rows:
                 warnings.append(
                     ParseWarning(
                         code="TABLE_EMPTY",
@@ -252,7 +335,7 @@ class PDFParser(BaseParser):
                 )
                 continue
 
-            col_counts = {len(r) for r in rows}
+            col_counts = {len(row) for row in rows}
             if len(col_counts) > 1:
                 warnings.append(
                     ParseWarning(
@@ -263,19 +346,26 @@ class PDFParser(BaseParser):
                     )
                 )
 
-            row_tops = [r.bbox[1] for r in table.rows] if table.rows else [table.bbox[1]] * len(rows)
+            row_tops = (
+                [row.bbox[1] for row in table.rows]
+                if table.rows
+                else [table.bbox[1]] * len(rows)
+            )
+
             for row_index, row in enumerate(rows):
-                cell_texts = [c if c is not None else "" for c in row]
+                cell_texts = [cell if cell is not None else "" for cell in row]
                 raw_text = " | ".join(cell_texts)
+
                 if not raw_text.strip():
                     continue
+
                 top = row_tops[row_index] if row_index < len(row_tops) else table.bbox[1]
                 items.append(
                     _PendingItem(
                         top=top,
                         block_type=BlockType.TABLE_ROW,
                         raw_text=raw_text,
-                        metadata={"cells": cell_texts},
+                        metadata={"cells": cell_texts, "source": "pdf_text"},
                         table_index=table_index,
                         row=row_index,
                     )
@@ -289,50 +379,69 @@ class PDFParser(BaseParser):
         def _in_any_table(char: dict) -> bool:
             cx0, cx1 = char["x0"], char["x1"]
             ctop, cbottom = char["top"], char["bottom"]
-            for (bx0, btop, bx1, bbottom) in table_bboxes:
-                if cx0 >= bx0 - 0.5 and cx1 <= bx1 + 0.5 and ctop >= btop - 0.5 and cbottom <= bbottom + 0.5:
+
+            for bx0, btop, bx1, bbottom in table_bboxes:
+                if (
+                    cx0 >= bx0 - 0.5
+                    and cx1 <= bx1 + 0.5
+                    and ctop >= btop - 0.5
+                    and cbottom <= bbottom + 0.5
+                ):
                     return True
+
             return False
 
-        chars = [c for c in page.chars if not _in_any_table(c)]
+        chars = [char for char in page.chars if not _in_any_table(char)]
         if not chars:
             return items
 
-        chars.sort(key=lambda c: (round(c["top"], 1), c["x0"]))
+        chars.sort(key=lambda char: (round(char["top"], 1), char["x0"]))
+
         lines: list[list[dict]] = []
         current_line: list[dict] = [chars[0]]
         current_top = chars[0]["top"]
 
-        for c in chars[1:]:
-            if abs(c["top"] - current_top) <= LINE_Y_TOLERANCE:
-                current_line.append(c)
+        for char in chars[1:]:
+            if abs(char["top"] - current_top) <= LINE_Y_TOLERANCE:
+                current_line.append(char)
             else:
                 lines.append(current_line)
-                current_line = [c]
-                current_top = c["top"]
+                current_line = [char]
+                current_top = char["top"]
+
         lines.append(current_line)
 
         line_entries: list[tuple[str, float]] = []
+
         for line_chars in lines:
-            line_chars_sorted = sorted(line_chars, key=lambda c: c["x0"])
-            text = "".join(c["text"] for c in line_chars_sorted)
-            top = min(c["top"] for c in line_chars)
+            line_chars_sorted = sorted(line_chars, key=lambda char: char["x0"])
+            text = "".join(char["text"] for char in line_chars_sorted)
+            top = min(char["top"] for char in line_chars)
             line_entries.append((text, top))
 
         pending_paragraph: list[str] = []
         pending_paragraph_top: float | None = None
 
-        def _flush_paragraph():
+        def _flush_paragraph() -> None:
             nonlocal pending_paragraph_top
+
             if not pending_paragraph:
                 return
-            raw_text = " ".join(t.strip() for t in pending_paragraph if t.strip())
+
+            raw_text = " ".join(text.strip() for text in pending_paragraph if text.strip())
             top = pending_paragraph_top
             pending_paragraph.clear()
             pending_paragraph_top = None
-            if not raw_text.strip():
-                return
-            items.append(_PendingItem(top=top, block_type=BlockType.PARAGRAPH, raw_text=raw_text, metadata={}))
+
+            if raw_text.strip():
+                items.append(
+                    _PendingItem(
+                        top=top,
+                        block_type=BlockType.PARAGRAPH,
+                        raw_text=raw_text,
+                        metadata={"source": "pdf_text"},
+                    )
+                )
 
         for raw_line, top in line_entries:
             if not raw_line.strip():
@@ -340,6 +449,7 @@ class PDFParser(BaseParser):
                 continue
 
             block_type = _classify_line(raw_line)
+
             if block_type == BlockType.HEADING:
                 _flush_paragraph()
                 heading_level = self._heading_level(raw_line)
@@ -348,17 +458,27 @@ class PDFParser(BaseParser):
                         top=top,
                         block_type=BlockType.HEADING,
                         raw_text=raw_line.strip(),
-                        metadata={"heading_level": heading_level},
+                        metadata={
+                            "heading_level": heading_level,
+                            "source": "pdf_text",
+                        },
                         is_heading=True,
                         heading_label=_heading_key(raw_line),
                         heading_level=heading_level,
                     )
                 )
+
             elif block_type == BlockType.LIST_ITEM:
                 _flush_paragraph()
                 items.append(
-                    _PendingItem(top=top, block_type=BlockType.LIST_ITEM, raw_text=raw_line.strip(), metadata={})
+                    _PendingItem(
+                        top=top,
+                        block_type=BlockType.LIST_ITEM,
+                        raw_text=raw_line.strip(),
+                        metadata={"source": "pdf_text"},
+                    )
                 )
+
             else:
                 if pending_paragraph_top is None:
                     pending_paragraph_top = top
@@ -370,6 +490,7 @@ class PDFParser(BaseParser):
     @staticmethod
     def _heading_level(line: str) -> int:
         stripped = line.strip()
+
         if _RE_HEADING_PHAN.match(stripped):
             return 1
         if _RE_HEADING_CHUONG.match(stripped):
@@ -381,10 +502,15 @@ class PDFParser(BaseParser):
         if _RE_HEADING_NUMBERED.match(stripped):
             segments = stripped.split()[0].rstrip(".").split(".")
             return 4 + len(segments)
+
         return 5
 
     def _collect_ocr_items(
-        self, *, page, page_number: int, request: ParseRequest
+        self,
+        *,
+        page,
+        page_number: int,
+        request: ParseRequest,
     ) -> tuple[list[_PendingItem], ParseWarning | None]:
         try:
             import pytesseract
@@ -395,6 +521,24 @@ class PDFParser(BaseParser):
                 cause=exc,
             ) from exc
 
+        lang = self._tesseract_lang(request.language_hint)
+
+        try:
+            pytesseract.get_tesseract_version()
+            installed_languages = set(pytesseract.get_languages(config=""))
+        except Exception as exc:
+            raise OCRFailed(
+                message="Tesseract executable is not available in the runtime environment",
+                source_id=request.source_ref.source_id,
+                cause=exc,
+            ) from exc
+
+        if lang not in installed_languages:
+            raise OCRFailed(
+                message=f"Tesseract language data '{lang}' is not installed",
+                source_id=request.source_ref.source_id,
+            )
+
         try:
             pil_image = page.to_image(resolution=OCR_RENDER_DPI).original
         except Exception as exc:
@@ -404,9 +548,12 @@ class PDFParser(BaseParser):
                 cause=exc,
             ) from exc
 
-        lang = self._tesseract_lang(request.language_hint)
         try:
-            ocr_data = pytesseract.image_to_data(pil_image, lang=lang, output_type=pytesseract.Output.DICT)
+            ocr_data = pytesseract.image_to_data(
+                pil_image,
+                lang=lang,
+                output_type=pytesseract.Output.DICT,
+            )
         except Exception as exc:
             raise OCRFailed(
                 message=f"OCR failed on page {page_number}",
@@ -425,12 +572,17 @@ class PDFParser(BaseParser):
         px_to_pt = 72.0 / OCR_RENDER_DPI
         lines_map: dict[tuple, list[int]] = {}
 
-        for i in range(n):
-            text = ocr_data["text"][i]
+        for index in range(n):
+            text = ocr_data["text"][index]
             if not text or not text.strip():
                 continue
-            key = (ocr_data["block_num"][i], ocr_data["par_num"][i], ocr_data["line_num"][i])
-            lines_map.setdefault(key, []).append(i)
+
+            key = (
+                ocr_data["block_num"][index],
+                ocr_data["par_num"][index],
+                ocr_data["line_num"][index],
+            )
+            lines_map.setdefault(key, []).append(index)
 
         if not lines_map:
             return [], ParseWarning(
@@ -440,43 +592,78 @@ class PDFParser(BaseParser):
             )
 
         ordered_keys = sorted(
-            lines_map.keys(),
-            key=lambda k: min(ocr_data["top"][i] for i in lines_map[k]),
+            lines_map,
+            key=lambda key: (
+                min(ocr_data["top"][index] for index in lines_map[key]),
+                min(ocr_data["left"][index] for index in lines_map[key]),
+            ),
         )
 
         items: list[_PendingItem] = []
         all_confidences: list[float] = []
         pending_paragraph: list[str] = []
+        pending_paragraph_confidences: list[float] = []
         pending_paragraph_top: float | None = None
 
-        def _flush_paragraph():
+        def _flush_paragraph() -> None:
             nonlocal pending_paragraph_top
+
             if not pending_paragraph:
                 return
-            raw_text = " ".join(t.strip() for t in pending_paragraph if t.strip())
+
+            raw_text = " ".join(text.strip() for text in pending_paragraph if text.strip())
             top = pending_paragraph_top
+            line_confidences = pending_paragraph_confidences.copy()
+
             pending_paragraph.clear()
+            pending_paragraph_confidences.clear()
             pending_paragraph_top = None
+
             if raw_text.strip():
                 items.append(
                     _PendingItem(
-                        top=top, block_type=BlockType.PARAGRAPH, raw_text=raw_text,
-                        metadata={"ocr_lang": lang},
+                        top=top,
+                        block_type=BlockType.PARAGRAPH,
+                        raw_text=raw_text,
+                        metadata={
+                            "source": "ocr",
+                            "ocr_lang": lang,
+                            "ocr_confidence": (
+                                round(sum(line_confidences) / len(line_confidences), 1)
+                                if line_confidences
+                                else None
+                            ),
+                            "ocr_line_count": len(line_confidences),
+                        },
                     )
                 )
 
         for key in ordered_keys:
-            idxs = lines_map[key]
-            words = [ocr_data["text"][i] for i in idxs]
-            confs = [float(ocr_data["conf"][i]) for i in idxs if str(ocr_data["conf"][i]).strip() not in ("", "-1")]
-            all_confidences.extend(confs)
+            indexes = lines_map[key]
+            words = [ocr_data["text"][index] for index in indexes]
 
-            line_text = " ".join(w for w in words if w.strip()).strip()
+            confidences: list[float] = []
+            for index in indexes:
+                try:
+                    confidence = float(ocr_data["conf"][index])
+                except (TypeError, ValueError):
+                    continue
+
+                if confidence >= 0:
+                    confidences.append(confidence)
+
+            all_confidences.extend(confidences)
+
+            line_text = " ".join(word for word in words if word.strip()).strip()
             if not line_text:
                 continue
 
-            top_pt = min(ocr_data["top"][i] for i in idxs) * px_to_pt
-            line_conf = round(sum(confs) / len(confs), 1) if confs else None
+            top_pt = min(ocr_data["top"][index] for index in indexes) * px_to_pt
+            line_confidence = (
+                round(sum(confidences) / len(confidences), 1)
+                if confidences
+                else None
+            )
             block_type = _classify_line(line_text)
 
             if block_type == BlockType.HEADING:
@@ -487,31 +674,50 @@ class PDFParser(BaseParser):
                         top=top_pt,
                         block_type=BlockType.HEADING,
                         raw_text=line_text,
-                        metadata={"heading_level": heading_level, "ocr_lang": lang, "ocr_confidence": line_conf},
+                        metadata={
+                            "source": "ocr",
+                            "heading_level": heading_level,
+                            "ocr_lang": lang,
+                            "ocr_confidence": line_confidence,
+                        },
                         is_heading=True,
                         heading_label=_heading_key(line_text),
                         heading_level=heading_level,
                     )
                 )
+
             elif block_type == BlockType.LIST_ITEM:
                 _flush_paragraph()
                 items.append(
                     _PendingItem(
-                        top=top_pt, block_type=BlockType.LIST_ITEM, raw_text=line_text,
-                        metadata={"ocr_lang": lang, "ocr_confidence": line_conf},
+                        top=top_pt,
+                        block_type=BlockType.LIST_ITEM,
+                        raw_text=line_text,
+                        metadata={
+                            "source": "ocr",
+                            "ocr_lang": lang,
+                            "ocr_confidence": line_confidence,
+                        },
                     )
                 )
+
             else:
                 if pending_paragraph_top is None:
                     pending_paragraph_top = top_pt
+
                 pending_paragraph.append(line_text)
+
+                if line_confidence is not None:
+                    pending_paragraph_confidences.append(line_confidence)
 
         _flush_paragraph()
 
-        for it in items:
-            it.metadata.setdefault("source", "ocr")
+        avg_confidence = (
+            sum(all_confidences) / len(all_confidences)
+            if all_confidences
+            else 0.0
+        )
 
-        avg_confidence = sum(all_confidences) / len(all_confidences) if all_confidences else 0.0
         warning = None
         if avg_confidence < OCR_LOW_CONFIDENCE_THRESHOLD:
             warning = ParseWarning(
@@ -527,8 +733,10 @@ class PDFParser(BaseParser):
     def _tesseract_lang(language_hint: str | None) -> str:
         if language_hint and language_hint.lower().startswith("vi"):
             return "vie"
+
         if language_hint and language_hint.lower().startswith("en"):
             return "eng"
+
         return "vie"
 
     def _finalize_items(
@@ -541,21 +749,27 @@ class PDFParser(BaseParser):
     ) -> list[ContentBlock]:
         blocks: list[ContentBlock] = []
 
-        for item in sorted(items, key=lambda it: it.top):
+        for item in sorted(items, key=lambda pending_item: pending_item.top):
             if item.is_heading and item.heading_label:
                 level = item.heading_level if item.heading_level is not None else 1
+
                 while section_stack and section_stack[-1][0] >= level:
                     section_stack.pop()
-                section_path_for_block = [lbl for _, lbl in section_stack]
+
+                section_path_for_block = [label for _, label in section_stack]
                 section_stack.append((level, item.heading_label))
             else:
-                section_path_for_block = [lbl for _, lbl in section_stack]
+                section_path_for_block = [label for _, label in section_stack]
 
             block_order = order.next()
-            loc_kwargs: dict = {"page": page_number, "section_path": section_path_for_block}
+            loc_kwargs: dict[str, Any] = {
+                "page": page_number,
+                "section_path": section_path_for_block,
+            }
 
             if item.table_index is not None:
                 loc_kwargs["table_index"] = item.table_index
+
             if item.row is not None:
                 loc_kwargs["row"] = item.row
 
@@ -564,7 +778,6 @@ class PDFParser(BaseParser):
                     block_id=f"pdf-{block_order:06d}",
                     block_type=item.block_type,
                     raw_text=item.raw_text,
-                    # Gọi normalize_text thay vì gán trực tiếp raw_text
                     normalized_text=normalize_text(item.raw_text),
                     order=block_order,
                     location=SourceLocation(**loc_kwargs),
