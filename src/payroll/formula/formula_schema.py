@@ -21,10 +21,13 @@ ALLOWED_SECTIONS = frozenset({"line_items", "deductions", "employer_cost"})
 class FormulaVariable:
     name: str
     source: str
+    field_code: str | None = None
+    value: float | bool | None = None
     description: str = ""
     def __post_init__(self) -> None:
         if not self.name.isidentifier(): raise ValueError("variable name must be a Python identifier")
-        if not self.source or "." not in self.source: raise ValueError("variable source must be a qualified schema path")
+        if self.source not in {"employee", "attendance", "rate_config", "regulatory", "literal"}:
+            raise ValueError("variable source must use the shared payroll input contract")
 
 
 @dataclass(frozen=True)
