@@ -16,18 +16,47 @@ from ..parsers.base_parser import (
     SourceLocation,
 )
 
+try:
+    # Package import path for repo installs / package-style usage.
+    from ...config import (
+        CHUNK_MAX_SIZE,
+        CHUNK_MIN_SIZE,
+        CHUNK_PRESERVE_RULES,
+        CHUNK_RESPECT_HEADING_BOUNDARIES,
+        CHUNK_OVERLAP_TYPE,
+        CHUNK_OVERLAP_CHARS,
+        CHUNK_OVERLAP_MIN_SIZE,
+    )
+except ImportError:
+    # Direct src/ execution: src is on PYTHONPATH, not as a package.
+    from config import (
+        CHUNK_MAX_SIZE,
+        CHUNK_MIN_SIZE,
+        CHUNK_PRESERVE_RULES,
+        CHUNK_RESPECT_HEADING_BOUNDARIES,
+        CHUNK_OVERLAP_TYPE,
+        CHUNK_OVERLAP_CHARS,
+        CHUNK_OVERLAP_MIN_SIZE,
+    )
+
 
 @dataclass
 class ChunkingConfig:
-    """Configuration for the structure chunker."""
+    """Configuration for the structure chunker using config.py as single source of truth."""
 
-    max_chunk_size: int = 1000  # Maximum characters per chunk
-    min_chunk_size: int = 100  # Minimum characters per chunk
+    max_chunk_size: int = CHUNK_MAX_SIZE
+    min_chunk_size: int = CHUNK_MIN_SIZE
     overlap_config: Optional[OverlapConfig] = None
-    preserve_rules: bool = True  # Never cut in the middle of a single rule (list item / table row)
-    respect_heading_boundaries: bool = True  # Prefer breaking at heading boundaries
+    preserve_rules: bool = CHUNK_PRESERVE_RULES
+    respect_heading_boundaries: bool = CHUNK_RESPECT_HEADING_BOUNDARIES
 
     def __post_init__(self):
+        if self.overlap_config is None:
+            self.overlap_config = OverlapConfig(
+                overlap_type=CHUNK_OVERLAP_TYPE,
+                overlap_chars=CHUNK_OVERLAP_CHARS,
+                min_chunk_size=CHUNK_OVERLAP_MIN_SIZE,
+            )
         if self.max_chunk_size <= self.min_chunk_size:
             raise ValueError(
                 f"max_chunk_size ({self.max_chunk_size}) must be > "
@@ -40,59 +69,25 @@ class ChunkingConfig:
 
 
 def default_chunking_config() -> ChunkingConfig:
-    """
-    Build the default ChunkingConfig from the constants in src/config.py.
-
-    This is the single source of truth for chunk sizing / overlap defaults —
-    change the values in config.py, not here.
-    """
-    from ..config import (
-        CHUNK_MAX_SIZE,
-        CHUNK_MIN_SIZE,
-        CHUNK_PRESERVE_RULES,
-        CHUNK_RESPECT_HEADING_BOUNDARIES,
-        CHUNK_OVERLAP_TYPE,
-        CHUNK_OVERLAP_CHARS,
-        CHUNK_OVERLAP_MIN_SIZE,
-    )
-
-    return ChunkingConfig(
-        max_chunk_size=CHUNK_MAX_SIZE,
-        min_chunk_size=CHUNK_MIN_SIZE,
-        overlap_config=OverlapConfig(
-            overlap_type=CHUNK_OVERLAP_TYPE,
-            overlap_chars=CHUNK_OVERLAP_CHARS,
-            min_chunk_size=CHUNK_OVERLAP_MIN_SIZE,
-        ),
-        preserve_rules=CHUNK_PRESERVE_RULES,
-        respect_heading_boundaries=CHUNK_RESPECT_HEADING_BOUNDARIES,
-    )
+    """Build default ChunkingConfig."""
+    return ChunkingConfig()
 
 
 @dataclass
 class _TraversalState:
-    """
-    Internal state during document traversal for chunking.
-
-    Tracks heading hierarchy at ARBITRARY depth (not just H1-H3), since legal
-    documents (Phần > Chương > Mục > Điều > Khoản > ...) can go deeper than 3
-    levels. `level_1`/`level_2`/`level_3` on HeadingContext are still filled
-    in for backward compatibility, but `section_path` always reflects the
-    full hierarchy regardless of depth and should be preferred for citation.
-    """
+    """Internal state during document traversal for chunking."""
 
     current_levels: dict[int, str] = field(default_factory=dict)
 
     def update_from_block(self, block: ContentBlock) -> None:
-        """Update heading context from a block."""
+        """Update heading context from a block using unified 'heading_level' key."""
         if block.block_type != BlockType.HEADING:
             return
 
-        level = block.metadata.get("level", 1)
+        # Thống nhất đọc key 'heading_level'
+        level = block.metadata.get("heading_level", 1)
         text = block.normalized_text.strip()
 
-        # Any previously tracked level deeper than (or equal to) this one is
-        # now out of scope — a new heading at this level starts a new section.
         self.current_levels = {
             lv: t for lv, t in self.current_levels.items() if lv < level
         }
@@ -123,7 +118,6 @@ class _ChunkBuilder:
         """Add a block to the chunk."""
         self.blocks.append(block)
         self.text_parts.append(block.normalized_text)
-        # Account for newline separator (one less than number of parts)
         separator_count = len(self.text_parts) - 1
         self.current_char_count = sum(len(p) for p in self.text_parts) + separator_count
 
@@ -134,6 +128,17 @@ class _ChunkBuilder:
     def get_block_ids(self) -> list[str]:
         """Get block IDs."""
         return [b.block_id for b in self.blocks]
+
+    def get_root_block_ids(self) -> list[str]:
+        """Get root block IDs, preserving the original document block lineage."""
+        roots: list[str] = []
+        seen: set[str] = set()
+        for block in self.blocks:
+            root_id = block.metadata.get("root_block_id") or block.block_id
+            if root_id not in seen:
+                roots.append(root_id)
+                seen.add(root_id)
+        return roots
 
     def get_block_types(self) -> list[BlockType]:
         """Get block types."""
@@ -147,7 +152,6 @@ class _ChunkBuilder:
         first = self.blocks[0]
         last = self.blocks[-1]
 
-        # Merge locations
         return SourceLocation(
             page=first.location.page,
             sheet=first.location.sheet,
@@ -168,78 +172,86 @@ class _ChunkBuilder:
         max_size: int,
         preserve_rules: bool
     ) -> bool:
-        """
-        Check if a block can be added without exceeding size limit.
-
-        Respects rule boundaries: list items and table rows of the SAME rule
-        type stay together (a single rule is never split across chunks).
-        This does not guarantee an entire list/table stays in one chunk —
-        only that no other block type is spliced into the middle of a run
-        of list items / table rows.
-        """
-        # Calculate new size including the newline separator
+        """Check if a block can be added without exceeding max_size."""
         new_text_size = len(block.normalized_text)
-        separator_size = 1 if self.text_parts else 0  # '\n' if not first block
+        separator_size = 1 if self.text_parts else 0
         new_size = self.current_char_count + separator_size + new_text_size
 
         if new_size > max_size:
             return False
 
-        if preserve_rules and self.blocks:
-            last_block = self.blocks[-1]
-            # Don't split list items or table rows
-            if last_block.block_type in (BlockType.LIST_ITEM, BlockType.TABLE_ROW):
-                # Can add if it's the same rule type
-                return block.block_type == last_block.block_type
-
+        # Nếu không vượt quá max_size thì cho phép thêm
         return True
 
 
 class StructureChunker:
-    """
-    Converts ParsedDocument to Chunk[] while respecting document structure.
-
-    Key principles:
-    - Groups ContentBlocks into Chunks
-    - Preserves heading hierarchy (context)
-    - Respects structural boundaries (rules, list items, tables)
-    - Applies size constraints (min/max) WITHOUT ever dropping content —
-      undersized leftovers are merged into a neighboring chunk rather than
-      discarded, since silently losing text is unacceptable for legal source
-      material
-    - Generates stable chunk IDs
-    - Applies overlap for context preservation
-    """
+    """Converts ParsedDocument to Chunk[] while respecting document structure."""
 
     def __init__(self, config: Optional[ChunkingConfig] = None):
-        """Initialize chunker with configuration."""
         self.config = config or default_chunking_config()
         self.overlap_strategy = create_overlap_strategy(
             self.config.overlap_config
         )
 
+    def _split_oversized_block(self, block: ContentBlock) -> list[ContentBlock]:
+        """Cắt nhỏ các ContentBlock đơn lẻ vượt quá max_chunk_size."""
+        text = block.normalized_text
+        max_size = self.config.max_chunk_size
+        
+        if len(text) <= max_size:
+            return [block]
+
+        sub_blocks = []
+        start = 0
+        sub_id = 0
+        while start < len(text):
+            end = start + max_size
+            if end < len(text):
+                last_space = text.rfind(' ', start, end)
+                if last_space > start:
+                    end = last_space + 1
+
+            slice_text = text[start:end]
+            if slice_text:
+                normalized_slice = slice_text.strip()
+                if not normalized_slice and not slice_text.strip():
+                    start = end
+                    continue
+
+                block_metadata = block.metadata.copy()
+                block_metadata["root_block_id"] = block.block_id
+                block_metadata["parent_block_id"] = block.block_id
+                block_metadata["split_index"] = sub_id
+
+                sub_blocks.append(
+                    ContentBlock(
+                        block_id=f"{block.block_id}_sub_{sub_id}",
+                        block_type=block.block_type,
+                        raw_text=slice_text,
+                        normalized_text=slice_text,
+                        order=block.order + sub_id,
+                        location=block.location,
+                        metadata=block_metadata,
+                    )
+                )
+                sub_id += 1
+            start = end
+        return sub_blocks
+
     def chunk(self, doc: ParsedDocument) -> ChunkBatch:
-        """
-        Convert ParsedDocument to Chunk[].
-
-        Args:
-            doc: The parsed document to chunk
-
-        Returns:
-            ChunkBatch containing all chunks
-
-        Raises:
-            ValueError: If chunking fails or document is invalid
-        """
         if not doc.blocks:
             raise ValueError("Cannot chunk empty document")
+
+        # Cắt nhỏ các block vượt max_chunk_size trước khi gom chunk
+        processed_blocks = []
+        for block in doc.blocks:
+            processed_blocks.extend(self._split_oversized_block(block))
 
         segments: list[tuple[_ChunkBuilder, HeadingContext]] = []
         state = _TraversalState()
         builder = _ChunkBuilder()
 
-        for block in doc.blocks:
-            # Force break when encountering a new HEADING block (if enabled)
+        for block in processed_blocks:
             force_break = (
                 self.config.respect_heading_boundaries
                 and block.block_type == BlockType.HEADING
@@ -255,21 +267,12 @@ class StructureChunker:
                     )
                 )
             ):
-                # Finalize the segment using the heading context as it stood
-                # BEFORE this block (this block has not updated `state` yet),
-                # i.e. the heading context that actually applies to the
-                # blocks already accumulated in `builder`.
                 segments.append((builder, state.get_heading_context()))
                 builder = _ChunkBuilder()
 
-            # Update heading context AFTER finalizing the previous segment,
-            # so a heading block starts governing context from itself onward
-            # without corrupting the segment finalized just above.
             state.update_from_block(block)
             builder.add_block(block)
 
-        # Always close out the last segment, even if under min_chunk_size —
-        # it gets merged with a neighbor below rather than dropped.
         segments.append((builder, state.get_heading_context()))
 
         segments = self._merge_small_segments(segments)
@@ -279,10 +282,8 @@ class StructureChunker:
             for order, (seg_builder, heading_context) in enumerate(segments)
         ]
 
-        # Apply overlap strategy to all chunks
         chunks = self._apply_overlap(chunks)
 
-        # Create and return batch
         return ChunkBatch(
             source_ref=doc.source_ref,
             chunks=chunks,
@@ -300,20 +301,7 @@ class StructureChunker:
         self,
         segments: list[tuple[_ChunkBuilder, HeadingContext]],
     ) -> list[tuple[_ChunkBuilder, HeadingContext]]:
-        """
-        Merge undersized segments into a neighboring segment instead of
-        dropping them, so no source text is ever lost.
-
-        A merge is only performed when the undersized segment's heading
-        context is IDENTICAL to the neighbor's — i.e. the split was purely a
-        size artifact within the same section (e.g. a trailing short
-        paragraph of the same "Điều"). If the small segment starts a
-        genuinely different section (its own heading differs), it is kept
-        as its own chunk instead of being merged: correct heading
-        attribution matters more than hitting min_chunk_size exactly, and
-        merging across a heading boundary would mislabel content under the
-        wrong section for citation purposes.
-        """
+        """Gộp các đoạn nhỏ hơn min_chunk_size đảm bảo không vượt quá max_chunk_size."""
         if not segments:
             return segments
 
@@ -321,9 +309,13 @@ class StructureChunker:
 
         for seg_builder, heading_context in segments[1:]:
             prev_builder, prev_heading = merged[-1]
+            combined_size = prev_builder.current_char_count + 1 + seg_builder.current_char_count
+
+            # Kiểm tra thêm điều kiện max_chunk_size trước khi gộp
             if (
                 seg_builder.current_char_count < self.config.min_chunk_size
                 and heading_context == prev_heading
+                and combined_size <= self.config.max_chunk_size
             ):
                 for block in seg_builder.blocks:
                     prev_builder.add_block(block)
@@ -331,20 +323,25 @@ class StructureChunker:
             else:
                 merged.append((seg_builder, heading_context))
 
-        # Edge case: the very first segment is undersized. There is no
-        # previous segment to merge into — merge it forward into the next
-        # one, but only if they share the same heading context.
-        if (
-            len(merged) > 1
-            and merged[0][0].current_char_count < self.config.min_chunk_size
-            and merged[0][1] == merged[1][1]
-        ):
-            first_builder, _first_heading = merged.pop(0)
-            next_builder, next_heading = merged[0]
-            combined = _ChunkBuilder()
-            for block in first_builder.blocks + next_builder.blocks:
-                combined.add_block(block)
-            merged[0] = (combined, next_heading)
+        # Vòng lặp gộp tiến cho các đoạn đầu/đoạn chưa đạt min_chunk_size
+        i = 0
+        while i < len(merged) - 1:
+            builder, heading = merged[i]
+            next_builder, next_heading = merged[i + 1]
+            combined_size = builder.current_char_count + 1 + next_builder.current_char_count
+
+            if (
+                builder.current_char_count < self.config.min_chunk_size
+                and heading == next_heading
+                and combined_size <= self.config.max_chunk_size
+            ):
+                combined = _ChunkBuilder()
+                for block in builder.blocks + next_builder.blocks:
+                    combined.add_block(block)
+                merged[i] = (combined, heading)
+                merged.pop(i + 1)
+            else:
+                i += 1
 
         return merged
 
@@ -355,8 +352,8 @@ class StructureChunker:
         source_ref,
         order: int
     ) -> Chunk:
-        """Build a Chunk from accumulated blocks."""
         block_ids = builder.get_block_ids()
+        root_block_ids = builder.get_root_block_ids()
         text = builder.get_text()
 
         chunk_id = Chunk.generate_chunk_id(
@@ -371,6 +368,7 @@ class StructureChunker:
             source_ref=source_ref,
             text=text,
             block_ids=block_ids,
+            root_block_ids=root_block_ids,
             location=builder.get_location(),
             heading_context=heading_context,
             block_types=builder.get_block_types(),
@@ -383,28 +381,15 @@ class StructureChunker:
         )
 
     def _apply_overlap(self, chunks: list[Chunk]) -> list[Chunk]:
-        """Apply overlap strategy to all chunks."""
         result = []
-
         for idx, chunk in enumerate(chunks):
             previous_chunk = result[idx - 1] if idx > 0 else None
             chunk_with_overlap = self.overlap_strategy.apply_overlap(
                 chunk, previous_chunk
             )
             result.append(chunk_with_overlap)
-
         return result
 
 
 def create_chunker(config: Optional[ChunkingConfig] = None) -> StructureChunker:
-    """
-    Factory function to create a structure chunker.
-
-    Args:
-        config: Optional chunking configuration. Defaults to the values in
-            src/config.py when omitted.
-
-    Returns:
-        Configured StructureChunker instance
-    """
     return StructureChunker(config or default_chunking_config())

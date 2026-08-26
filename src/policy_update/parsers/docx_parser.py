@@ -1,3 +1,4 @@
+# docx_parser.py
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
@@ -40,7 +41,7 @@ class DocxParser(BaseParser):
     def _parse(self, request: ParseRequest) -> ParsedDocument:
         try:
             file_bytes = request.file_stream.read()
-        except Exception as exc:  # pragma: no cover - defensive path
+        except Exception as exc:
             raise ParseError(
                 "Unable to read DOCX file stream", source_id=request.source_ref.source_id, cause=exc
             ) from exc
@@ -89,15 +90,20 @@ class DocxParser(BaseParser):
                 normalized = normalize_text(raw_text)
                 if not normalized:
                     continue
+
+                heading_level, metadata = self._detect_paragraph_heading(child)
+                block_type = BlockType.HEADING if heading_level is not None else BlockType.PARAGRAPH
+                metadata["source"] = "docx"
+
                 blocks.append(
                     ContentBlock(
                         block_id=f"docx-p-{order}",
-                        block_type=BlockType.PARAGRAPH,
+                        block_type=block_type,
                         raw_text=raw_text,
                         normalized_text=normalized,
                         order=order,
                         location=SourceLocation(section_path=["document", "body"]),
-                        metadata={"source": "docx"},
+                        metadata=metadata,
                     )
                 )
                 order += 1
@@ -149,9 +155,57 @@ class DocxParser(BaseParser):
         )
 
     @staticmethod
+    def _detect_paragraph_heading(paragraph: ET.Element) -> tuple[int | None, dict]:
+        """Detect Word heading level from style and outline metadata."""
+        p_pr = paragraph.find(f"{_W}pPr")
+        style_name = ""
+        outline_level = None
+
+        if p_pr is not None:
+            p_style = p_pr.find(f"{_W}pStyle")
+            if p_style is not None:
+                style_name = p_style.attrib.get(f"{_W}val", "")
+
+            outline = p_pr.find(f"{_W}outlineLvl")
+            if outline is not None:
+                raw_outline = outline.attrib.get(f"{_W}val")
+                if raw_outline is not None:
+                    try:
+                        outline_level = int(raw_outline)
+                    except (TypeError, ValueError):
+                        outline_level = None
+
+        heading_level = None
+        normalized_style = style_name.lower().replace("-", "").replace("_", "")
+
+        if "heading" in normalized_style:
+            suffix = normalized_style.split("heading", 1)[1]
+            if suffix.isdigit():
+                heading_level = int(suffix)
+            elif style_name:
+                heading_level = 1
+
+        if heading_level is None and outline_level is not None:
+            heading_level = outline_level + 1
+
+        if heading_level is None and "title" in normalized_style:
+            heading_level = 1
+
+        metadata: dict[str, object] = {}
+        if heading_level is not None:
+            heading_level = max(1, min(int(heading_level), 9))
+            metadata["heading_level"] = heading_level
+
+        if style_name:
+            metadata["style_name"] = style_name
+
+        if heading_level is not None and style_name:
+            metadata["is_heading"] = True
+
+        return (heading_level if heading_level is not None else None), metadata
+
+    @staticmethod
     def _paragraph_text(paragraph: ET.Element) -> str:
-        """Concatenate all text runs within a paragraph (across multiple <w:r> runs),
-        preserving tabs and line breaks so words don't get glued together."""
         parts: list[str] = []
         for node in paragraph.iter():
             if node.tag == f"{_W}t":
@@ -173,12 +227,6 @@ class DocxParser(BaseParser):
 
     @staticmethod
     def _read_page_count(archive: zipfile.ZipFile) -> int | None:
-        """Best-effort page count from Word's cached app properties.
-
-        This value is written by Word at save time and can be stale (e.g. if the
-        file was edited by another tool), so it's a hint, not a guarantee.
-        Returns None when unavailable rather than a fabricated default.
-        """
         if "docProps/app.xml" not in archive.namelist():
             return None
         try:

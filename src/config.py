@@ -18,4 +18,6 @@ CHUNK_OVERLAP_MIN_SIZE = 50  # Minimum chunk size to apply overlap
 
 # Retriever configuration
 EMBEDDING_MODEL = "BAAI/bge-m3"
+VECTOR_SIZE = 1024
 RERANKER_MODEL = "AITeamVN/Vietnamese_Reranker"
+TOP_K = 5

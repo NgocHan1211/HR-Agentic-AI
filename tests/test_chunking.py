@@ -8,6 +8,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from policy_update.chunking import (
@@ -232,6 +234,88 @@ def test_preserve_rules():
             print(f"  - Chunk with list items: {block_ids}")
     
     print("✓ Rule preservation: list items handled correctly")
+
+
+def test_empty_document_raises():
+    """Empty document should fail fast."""
+    source_ref = SourceRef(
+        source_id="empty-doc",
+        display_name="empty.pdf",
+        persistence=Persistence.TEMPORARY,
+    )
+    doc = ParsedDocument(source_ref=source_ref, blocks=[])
+
+    with pytest.raises(ValueError, match="Cannot chunk empty document"):
+        StructureChunker().chunk(doc)
+
+
+def test_oversized_single_block_is_split():
+    """A single very long paragraph should be split into multiple chunks."""
+    source_ref = SourceRef(
+        source_id="large-doc",
+        display_name="large_policy.txt",
+        persistence=Persistence.TEMPORARY,
+    )
+    long_text = "This is a policy paragraph. " * 80
+    doc = ParsedDocument(
+        source_ref=source_ref,
+        blocks=[
+            ContentBlock(
+                block_id="p_long",
+                block_type=BlockType.PARAGRAPH,
+                raw_text=long_text,
+                normalized_text=long_text,
+                order=0,
+                location=SourceLocation(page=1),
+            )
+        ],
+    )
+
+    batch = StructureChunker(
+        ChunkingConfig(max_chunk_size=300, min_chunk_size=40)
+    ).chunk(doc)
+
+    assert len(batch.chunks) > 1
+    assert sum(len(chunk.text) for chunk in batch.chunks) >= len(long_text)
+    assert all(chunk.root_block_ids == ["p_long"] for chunk in batch.chunks)
+    assert batch.get_coverage() == (1, 1)
+
+
+def test_document_without_headings_still_chunks():
+    """Paragraph-only documents should still create valid chunks with empty heading path."""
+    source_ref = SourceRef(
+        source_id="plain-doc",
+        display_name="plain_policy.txt",
+        persistence=Persistence.TEMPORARY,
+    )
+    doc = ParsedDocument(
+        source_ref=source_ref,
+        blocks=[
+            ContentBlock(
+                block_id="p_1",
+                block_type=BlockType.PARAGRAPH,
+                raw_text="Employees must follow all internal policies.",
+                normalized_text="Employees must follow all internal policies.",
+                order=0,
+                location=SourceLocation(page=1),
+            ),
+            ContentBlock(
+                block_id="p_2",
+                block_type=BlockType.PARAGRAPH,
+                raw_text="Attendance is tracked through the HR portal.",
+                normalized_text="Attendance is tracked through the HR portal.",
+                order=1,
+                location=SourceLocation(page=1),
+            ),
+        ],
+    )
+
+    batch = StructureChunker(
+        ChunkingConfig(max_chunk_size=120, min_chunk_size=20)
+    ).chunk(doc)
+
+    assert len(batch.chunks) > 0
+    assert all(chunk.heading_context.get_full_path() == "" for chunk in batch.chunks)
 
 
 def run_all_tests():
