@@ -26,15 +26,22 @@ class QwenLocalCompletionClient:
     def _transformers_complete(self, system: str, user: str) -> str:
         if self._model is None:
             try:
+                import torch
                 from transformers import AutoModelForCausalLM, AutoTokenizer
             except ImportError as exc: raise RuntimeError("install transformers, accelerate and torch") from exc
+            use_cuda = torch.cuda.is_available()
             self._tokenizer = AutoTokenizer.from_pretrained(self.model_id)
             if self._tokenizer.pad_token_id is None:
                 # Qwen tokenizers often have no pad token; without one, generate() can
                 # behave unpredictably (including emitting an immediate EOS -> empty output).
                 self._tokenizer.pad_token = self._tokenizer.eos_token
-            self._model = AutoModelForCausalLM.from_pretrained(self.model_id, torch_dtype="auto", device_map="auto")
+            model_options: dict[str, Any] = {"torch_dtype": torch.float16 if use_cuda else torch.float32}
+            if use_cuda:
+                model_options["device_map"] = "auto"
+            self._model = AutoModelForCausalLM.from_pretrained(self.model_id, **model_options)
             self._model.eval()
+            if os.getenv("QWEN_DEBUG"):
+                print(f"[QwenLocalCompletionClient] cuda_available={use_cuda}; device_map={'auto' if use_cuda else 'default CPU'}")
         inputs = self._tokenizer.apply_chat_template(self._messages(system, user), add_generation_prompt=True,
                                                       tokenize=True, return_dict=True, return_tensors="pt").to(self._model.device)
         outputs = self._model.generate(
@@ -60,8 +67,11 @@ class QwenLocalCompletionClient:
     def _vllm_complete(self, system: str, user: str) -> str:
         if self._model is None:
             try:
+                import torch
                 from vllm import LLM
             except ImportError as exc: raise RuntimeError("install vllm in a compatible CUDA environment") from exc
+            if not torch.cuda.is_available():
+                raise RuntimeError("vLLM requires an NVIDIA CUDA GPU, but torch.cuda.is_available() is False")
             self._model = LLM(model=self.model_id, dtype="auto", gpu_memory_utilization=0.80)
             try:
                 from transformers import AutoTokenizer

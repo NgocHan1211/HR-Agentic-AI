@@ -6,11 +6,23 @@ from typing import Any, Mapping
 
 from .anomaly_rules import check_anomaly_rules
 from .expression_evaluator import evaluate
+from .formula.formula_schema import ComponentCategory, DEDUCTION_CATEGORIES
 from .input_mapper import map_inputs
 from .models import LineItem, PayrollResult, as_mapping
 
+# Legacy naming heuristic, kept only as a last-resort fallback for FormulaRules that
+# predate the category field (see _section_for_category, which now runs first).
 _DEDUCTION_CODES = {"SI_EE", "HI_EE", "UI_EE", "PIT_PROGRESSIVE", "PIT_10"}
 _EMPLOYER_CODES = {"SI_ER", "HI_ER", "UI_ER", "TRADE_UNION_ER"}
+
+# category values (BHXH/PIT/DEDUCTION_OTHER -> deductions; BASIC/ALLOWANCE/BONUS/SALARY_OT
+# -> line_items) are the primary signal, per the Menu chung / SalaryComponents.xlsx data
+# dictionary. WORKDAY is intentionally excluded: it mixes attendance inputs and a few
+# employer-cost totals (TOTAL_PAYROLL_COST, SERVICE_FEE...), so it can't be classified from
+# category alone and still needs the naming/section fallback below.
+_DEDUCTION_CATEGORY_VALUES = {category.value for category in DEDUCTION_CATEGORIES}
+_INCOME_CATEGORY_VALUES = {ComponentCategory.BASIC.value, ComponentCategory.ALLOWANCE.value,
+                          ComponentCategory.BONUS.value, ComponentCategory.SALARY_OT.value}
 
 
 class PayrollEngine:
@@ -56,7 +68,9 @@ class PayrollEngine:
         rule_by_code = {as_mapping(rule)["output_field"]: as_mapping(rule) for rule in rules}
         line_items: list[LineItem] = []; deductions: list[LineItem] = []; employer_cost: list[LineItem] = []
         for code, amount in values.items():
-            section = rule_by_code[code].get("section") or field_categories.get(code) or _section_for(code)
+            rule = rule_by_code[code]
+            section = (rule.get("section") or field_categories.get(code)
+                      or _section_for_category(rule.get("category")) or _section_for(code))
             item = LineItem(code, amount)
             (deductions if section == "deductions" else employer_cost if section == "employer_cost" else line_items).append(item)
         return line_items, deductions, employer_cost
@@ -100,6 +114,20 @@ def _apply_rounding(amount: float, rounding: str | None) -> float:
     if rounding == "round":
         return round(amount)
     raise ValueError(f"unsupported rounding rule: {rounding}")
+
+
+def _section_for_category(category: str | None) -> str | None:
+    """Primary section resolution, driven by the Menu chung category (per HR feedback:
+    BHXH + PIT + khac deductions vs BASIC/ALLOWANCE/BONUS/SALARY_OT income). Returns None
+    for WORKDAY or an unrecognized/absent category, letting the caller fall back to the
+    naming heuristic (_section_for) or a rule's own declared section."""
+    if category is None:
+        return None
+    if category in _DEDUCTION_CATEGORY_VALUES:
+        return "deductions"
+    if category in _INCOME_CATEGORY_VALUES:
+        return "line_items"
+    return None
 
 
 def _section_for(code: str) -> str:

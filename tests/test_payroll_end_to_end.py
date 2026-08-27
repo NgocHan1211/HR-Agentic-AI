@@ -65,3 +65,23 @@ def test_attendance_sheets_are_merged_by_employee_id() -> None:
     }, mapping, "2025-05")
     assert len(records) == 1
     assert records[0].to_dict() == {"employee_id": "E-01", "period": "2025-05", "night_shift_hours": 12.0, "maternity_leave_days": 3.0}
+
+
+def test_excel_numeric_employee_ids_match_between_salary_and_attendance() -> None:
+    salary_spec = SheetMappingSpec("C", "salary_schema", {"Employees": {"columns": {"id": "employee_id"}}})
+    attendance_spec = SheetMappingSpec("C", "attendance", {"Attendance": {"columns": {"id": "employee_id"}}})
+    employees, _ = normalize_salary_schema({"Employees": pd.DataFrame([{"id": 21083.0}])}, salary_spec)
+    attendance = normalize_attendance({"Attendance": pd.DataFrame([{"id": "21083"}])}, attendance_spec, "2025-05")
+    assert validate_ingested_data(employees, attendance, "2025-05").passed
+
+
+def test_formula_extraction_normalizes_vietnamese_field_codes_to_shared_schema() -> None:
+    class VietnameseFieldCodeLLM:
+        def complete(self, *, system: str, user: str) -> str:
+            return json.dumps({"confidence": 1, "calculation_basis": "monthly", "variables": [
+                {"name": "luong", "source": "employee", "field_code": "luong_co_ban"},
+                {"name": "cong", "source": "attendance", "field_code": "ngay_cong"},
+            ], "rules": [{"output_field": "BASIC", "expression": "luong"}]})
+
+    candidate = extract_formula("demo", "C", llm_client=VietnameseFieldCodeLLM())
+    assert [item.field_code for item in candidate.proposed_spec.variables] == ["basic_salary", "total_working_days"]

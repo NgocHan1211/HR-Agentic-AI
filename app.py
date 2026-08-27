@@ -5,6 +5,7 @@ from io import BytesIO
 import mimetypes
 import re
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -30,18 +31,46 @@ st.caption("Chat hoặc upload quy chế → map một workbook Excel nhiều sh
 
 def default_formula(company_id: str) -> dict[str, Any]:
     return {"formula_id": "F-DEMO-v1", "company_id": company_id, "status": "active", "calculation_basis": "monthly",
+            "field_categories": {"BASIC": "line_items", "SALARY_OT_DAY_NORMAL_150": "line_items",
+                                 "SALARY_OT_NIGHT_HOLIDAY_300": "line_items", "SI_EE": "deductions",
+                                 "PIT_AMOUNT": "deductions", "SALARY_ADVANCE": "deductions"},
             "variables": [{"name": "basic", "source": "employee", "field_code": "basic_salary"},
                           {"name": "worked", "source": "attendance", "field_code": "total_working_days"},
                           {"name": "standard", "source": "attendance", "field_code": "standard_working_days"},
-                          {"name": "ot", "source": "attendance", "field_code": "ot_day_shift_150_hours"}],
-            "rules": [{"output_field": "BASIC", "expression": "prorate(basic, worked, standard)", "rounding": "round_down_1000"},
-                      {"output_field": "SALARY_OT_DAY_SHIFT_150", "expression": "BASIC / standard / 8 * ot * 1.5"},
-                      {"output_field": "SI_EE", "expression": "BASIC * .08", "section": "deductions"}]}
+                          {"name": "ot_day_normal", "source": "attendance", "field_code": "salary_ot_day_normal_150",
+                           "category": "SALARY_OT", "role": "input_variable",
+                           "ot_attributes": {"shift_type": "Day", "day_type": "Normal", "rate": 1.5}},
+                          {"name": "ot_night_holiday", "source": "attendance", "field_code": "salary_ot_night_holiday_300",
+                           "category": "SALARY_OT", "role": "input_variable",
+                           "ot_attributes": {"shift_type": "Night", "day_type": "Holiday", "rate": 3.0}},
+                          {"name": "advance", "source": "employee", "field_code": "salary_advance"},
+                          {"name": "pit_rate", "source": "literal", "value": 0.10}],
+            "rules": [{"output_field": "BASIC", "expression": "prorate(basic, worked, standard)", "rounding": "round_down_1000",
+                      "section": "line_items", "category": "BASIC"},
+                     {"output_field": "SALARY_OT_DAY_NORMAL_150", "expression": "BASIC / standard / 8 * ot_day_normal * 1.5",
+                      "rounding": "round_down_1000", "section": "line_items", "category": "SALARY_OT",
+                      "ot_attributes": {"shift_type": "Day", "day_type": "Normal", "rate": 1.5}},
+                     {"output_field": "SALARY_OT_NIGHT_HOLIDAY_300", "expression": "BASIC / standard / 8 * ot_night_holiday * 3.0",
+                      "rounding": "round_down_1000", "section": "line_items", "category": "SALARY_OT",
+                      "ot_attributes": {"shift_type": "Night", "day_type": "Holiday", "rate": 3.0}},
+                     {"output_field": "SI_EE", "expression": "BASIC * .105", "section": "deductions", "category": "BHXH"},
+                     {"output_field": "PIT_AMOUNT", "expression": "BASIC * pit_rate", "section": "deductions", "category": "PIT"},
+                     {"output_field": "SALARY_ADVANCE", "expression": "advance", "section": "deductions", "category": "DEDUCTION_OTHER"}]}
 
 
 def file_bytes(uploaded: Any) -> bytes:
     uploaded.seek(0)
     return uploaded.getvalue()
+
+
+@st.cache_data(show_spinner=False)
+def workbook_sheet_names(data: bytes) -> list[str]:
+    return list(pd.ExcelFile(BytesIO(data)).sheet_names)
+
+
+@st.cache_data(show_spinner=False)
+def workbook_sheet(data: bytes, sheet_name: str, header_row: int) -> pd.DataFrame:
+    return pd.read_excel(BytesIO(data), sheet_name=sheet_name, header=header_row - 1).dropna(how="all")
 
 
 def formula_from_text(text: str, evidence: dict[str, Any]) -> dict[str, Any]:
@@ -60,6 +89,7 @@ def document_text(uploaded: Any) -> tuple[str, list[str]]:
     return "\n".join(block.normalized_text for block in parsed.blocks), [warning.message for warning in parsed.warnings]
 
 
+@st.cache_data(show_spinner=False)
 def excel_features(data: bytes, name: str) -> tuple[list[dict[str, Any]], list[str]]:
     request = ParseRequest(SourceRef(f"workbook-{name}", name, Persistence.TEMPORARY), BytesIO(data), name,
                            Path(name).suffix, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -75,24 +105,58 @@ def excel_features(data: bytes, name: str) -> tuple[list[dict[str, Any]], list[s
     return list(tables.values()), [f"{item.code}: {item.message}" for item in parsed.warnings]
 
 
+def normalized_label(value: str) -> str:
+    """Compare Excel headers independently of accents, punctuation and case."""
+    value = unicodedata.normalize("NFKD", str(value).lower().replace("đ", "d"))
+    value = "".join(char for char in value if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9]+", " ", value).strip()
+
+
 def suggest(columns: list[str], words: tuple[str, ...]) -> str:
     for column in columns:
         value = column.lower().replace("đ", "d")
+        value = normalized_label(column)
         if any(word in value for word in words): return column
     return NONE
+
+
+_OT_RATE_RE = re.compile(r"(150|200|300)")
+
+
+def _suggest_ot_field_code(normalized_name: str) -> str:
+    """Disambiguate OT columns by shift/day-type/rate (SALARY_OT taxonomy), so two
+    different OT columns (e.g. '...150%' and '...300%') never collapse onto the same
+    field_code the way a single flat 'tang ca' -> 'ot_..._hours' rule would."""
+    shift = "night" if re.search(r"\bdem\b", normalized_name) else "day"
+    if re.search(r"\ble\b", normalized_name):
+        day_type = "holiday"
+    elif re.search(r"\bnghi\b|\brest\b", normalized_name):
+        day_type = "rest"
+    else:
+        day_type = "normal"
+    rate_match = _OT_RATE_RE.search(normalized_name)
+    rate = rate_match.group(1) if rate_match else "150"
+    return f"salary_ot_{shift}_{day_type}_{rate}"
 
 
 def suggested_field_code(column: str) -> str:
     """Useful defaults; HR may freely replace these with company-specific codes."""
     name = column.lower().replace("đ", "d")
+    name = normalized_label(column)
+    if any(term in name for term in ("luong cb", "luong thang", "muc luong", "tien luong")): return "basic_salary"
+    if any(term in name for term in ("so cong", "ngay lam viec", "cong thuc te")): return "total_working_days"
+    if any(term in name for term in ("cong chuan", "dinh muc cong")): return "standard_working_days"
+    if any(term in name for term in ("tang ca", "gio tang ca", "lam them")): return _suggest_ot_field_code(name)
+    if any(term in name for term in ("gio ca dem", "lam dem")): return "night_shift_hours"
     if "luong co ban" in name or "basic" in name: return "basic_salary"
     if "ngay cong chuan" in name or "standard" in name: return "standard_working_days"
     if "ngay cong" in name or "worked" in name: return "total_working_days"
-    if "ot" in name or "overtime" in name: return "ot_day_shift_150_hours"
+    if "ot" in name or "overtime" in name: return _suggest_ot_field_code(name)
     if "ca dem" in name or "night" in name: return "night_shift_hours"
     if "phep" in name or "leave" in name: return "annual_leave_days"
     if "thai san" in name or "maternity" in name: return "maternity_leave_days"
-    return re.sub(r"\W+", "_", name).strip("_")
+    if "tam ung" in name or "advance" in name: return "salary_advance"
+    return re.sub(r"\W+", "_", name).strip("_") or "field"
 
 
 def field_mappings(columns: list[str], employee_id_column: str, key_prefix: str) -> dict[str, str]:
@@ -104,6 +168,57 @@ def field_mappings(columns: list[str], employee_id_column: str, key_prefix: str)
         default = suggested_field_code(column)
         mapping[column] = st.text_input(f"Tên trường chuẩn cho ‘{column}’", default, key=f"{key_prefix}_{column}").strip()
     return {source: target for source, target in mapping.items() if target}
+
+
+def suggested_field_mappings(columns: list[str], employee_id_column: str, key_prefix: str,
+                             required_codes: set[str]) -> dict[str, str]:
+    """Editable mapping with conservative automatic field selection."""
+    candidates = [column for column in columns if column != employee_id_column]
+    defaults = [column for column in candidates if suggested_field_code(column) in required_codes]
+    if required_codes and not defaults:
+        st.info("Chưa nhận ra tên cột theo FormulaSpec. Hãy chọn cột bên dưới; app sẽ đề xuất mã trường khi bạn chọn.")
+    selected = st.multiselect("Các cột dùng cho payroll", candidates, default=defaults, key=f"{key_prefix}_columns",
+                              help="Đã gợi ý từ tên cột và FormulaSpec; bạn có thể thêm hoặc bỏ cột.")
+    mapping = {employee_id_column: "employee_id"}
+    for column in selected:
+        mapping[column] = st.text_input(f"Tên trường chuẩn cho ‘{column}’", suggested_field_code(column),
+                                        key=f"{key_prefix}_{column}").strip()
+    return {source: target for source, target in mapping.items() if target}
+
+
+def formula_required_codes(formula: dict[str, Any]) -> set[str]:
+    return {str(item.get("field_code")) for item in formula.get("variables", [])
+            if item.get("source") in {"employee", "attendance"} and item.get("field_code")}
+
+
+def show_formula_summary(formula: dict[str, Any]) -> None:
+    source_names = {"employee": "Hồ sơ nhân viên", "attendance": "Chấm công", "rate_config": "Cấu hình mức lương",
+                    "regulatory": "Quy định", "literal": "Giá trị cố định"}
+    st.caption(f"Cơ sở tính: {formula.get('calculation_basis', 'monthly')} · {len(formula.get('rules', []))} bước tính")
+    variables = [{"Biến": item.get("name"), "Lấy từ": source_names.get(item.get("source"), item.get("source")),
+                  "Trường dữ liệu": item.get("field_code") or "—", "Mô tả": item.get("description") or "—"}
+                 for item in formula.get("variables", [])]
+    if variables:
+        st.dataframe(pd.DataFrame(variables), hide_index=True, use_container_width=True)
+    rules = [{"Khoản tính": item.get("output_field"), "Công thức": item.get("expression"),
+              "Điều kiện": item.get("condition") or "Luôn áp dụng", "Nhóm": item.get("section") or "Thu nhập",
+              "Làm tròn": item.get("rounding") or "—", "Diễn giải": item.get("description") or "—"}
+             for item in formula.get("rules", [])]
+    if rules:
+        st.dataframe(pd.DataFrame(rules), hide_index=True, use_container_width=True)
+    with st.expander("Xem JSON kỹ thuật"):
+        st.json(formula)
+
+
+def validation_message(validation: Any) -> str:
+    unknown = [error for error in validation.errors if "employee_id not found in salary schema" in error]
+    other = [error for error in validation.errors if error not in unknown]
+    messages = list(other)
+    if unknown:
+        examples = [error.split(":", 1)[0].replace("attendance ", "") for error in unknown[:8]]
+        messages.append(f"{len(unknown)} mã nhân viên từ chấm công không có trong sheet nhân viên (ví dụ: {', '.join(examples)}). "
+                        "Kiểm tra lại cột Mã nhân viên ở mỗi sheet; mã phải cùng định dạng.")
+    return " | ".join(messages)
 
 
 def final_excel(results: list[Any]) -> bytes:
@@ -165,7 +280,7 @@ if not workbook_file:
     st.stop()
 data = file_bytes(workbook_file)
 try:
-    sheet_names = list(pd.ExcelFile(BytesIO(data)).sheet_names)
+    sheet_names = workbook_sheet_names(data)
     with st.expander("Đặc trưng do Excel Parser trích xuất", expanded=True):
         table_features, parser_warnings = excel_features(data, workbook_file.name)
         st.dataframe(pd.DataFrame(table_features), hide_index=True, use_container_width=True)
@@ -176,12 +291,12 @@ except Exception as exc:
 st.subheader("3. Mapping các sheet vào dữ liệu payroll")
 employee_sheet = st.selectbox("Sheet nhân viên/lương cơ bản", sheet_names)
 employee_header = st.number_input("Dòng header sheet nhân viên", 1, value=1)
-employee_frame = pd.read_excel(BytesIO(data), sheet_name=employee_sheet, header=int(employee_header) - 1).dropna(how="all")
+employee_frame = workbook_sheet(data, employee_sheet, int(employee_header))
 employee_columns = [str(value) for value in employee_frame.columns]
 st.dataframe(employee_frame.head(8), hide_index=True, use_container_width=True)
 employee_id = st.selectbox("Cột mã nhân viên của sheet nhân viên", employee_columns,
                           index=employee_columns.index(suggest(employee_columns, ("mã nv", "ma nv", "employee_id"))) if suggest(employee_columns, ("mã nv", "ma nv", "employee_id")) in employee_columns else 0)
-employee_map = field_mappings(employee_columns, employee_id, "employee")
+employee_map = suggested_field_mappings(employee_columns, employee_id, "employee", formula_required_codes(st.session_state.formula or default_formula("UPLOAD")))
 
 source_sheets = st.multiselect("Các sheet cung cấp dữ liệu tính lương", [name for name in sheet_names if name != employee_sheet],
                                help="Ví dụ: Ca đêm, Phép năm, Thai sản, OT. Các trường cùng nhân viên sẽ được gộp.")
@@ -190,12 +305,15 @@ attendance_specs: dict[str, dict[str, Any]] = {}
 for sheet in source_sheets:
     with st.expander(f"Map sheet: {sheet}", expanded=True):
         header = st.number_input(f"Dòng header — {sheet}", 1, value=1, key=f"header_{sheet}")
-        frame = pd.read_excel(BytesIO(data), sheet_name=sheet, header=int(header) - 1).dropna(how="all")
+        frame = workbook_sheet(data, sheet, int(header))
         columns = [str(value) for value in frame.columns]
+        detected_id = suggest(columns, ("ma nv", "ma nhan vien", "employee id"))
+        if detected_id in columns:
+            columns = [detected_id, *[column for column in columns if column != detected_id]]
         st.dataframe(frame.head(6), hide_index=True, use_container_width=True)
         employee_column = st.selectbox(f"Cột mã nhân viên — {sheet}", columns, key=f"id_{sheet}")
         attendance_raw[sheet] = frame
-        attendance_specs[sheet] = {"columns": field_mappings(columns, employee_column, f"field_{sheet}")}
+        attendance_specs[sheet] = {"columns": suggested_field_mappings(columns, employee_column, f"field_{sheet}", formula_required_codes(st.session_state.formula or default_formula("UPLOAD")))}
 
 with st.expander("Cấu hình chạy payroll"):
     company_id = st.text_input("Company ID", "UPLOAD")
@@ -205,7 +323,7 @@ with st.expander("Cấu hình chạy payroll"):
 
 formula = st.session_state.formula or default_formula(company_id)
 with st.expander("FormulaSpec sẽ chạy", expanded=st.session_state.formula is not None):
-    st.json(formula)
+    show_formula_summary(formula)
 st.caption("Tên trường chuẩn trong mapping phải khớp `field_code` của FormulaSpec. Ví dụ: map ‘Giờ ca đêm’ thành `night_shift_hours` nếu công thức dùng field này.")
 
 if st.button("Xác nhận công thức & tính lương", type="primary"):
@@ -215,6 +333,8 @@ if st.button("Xác nhận công thức & tính lương", type="primary"):
         employees, company = normalize_salary_schema({employee_sheet: employee_frame}, SheetMappingSpec(company_id, "salary_schema", {employee_sheet: {"columns": employee_map}}))
         records = normalize_attendance(attendance_raw, SheetMappingSpec(company_id, "attendance", attendance_specs), period)
         validation = validate_ingested_data(employees, records, period)
+        if not validation.passed:
+            st.error("Dữ liệu không hợp lệ: " + validation_message(validation)); st.stop()
         if not validation.passed: st.error("Dữ liệu không hợp lệ: " + " | ".join(validation.errors)); st.stop()
         by_id = {item.employee_id: item for item in records}; results, failures = [], []
         active_formula = {**formula, "company_id": company_id, "status": "active"}

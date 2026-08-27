@@ -151,6 +151,31 @@ def safe_eval(expression: str, env: dict[str, Any]) -> Any:
     return _eval_node(tree, env)
 
 
+def summarize_by_section(spec: "FormulaSpec", outputs: dict[str, Any]) -> dict[str, Any]:
+    """
+    Group the rule outputs of a compiled formula run by accounting section
+    (spec.field_categories: field_code -> 'line_items' | 'deductions' | 'employer_cost')
+    and compute NET pay:
+
+        NET = tong thu nhap (line_items) - tong khau tru (deductions: BHXH + PIT + khac)
+
+    Employer-side costs (BHXH company portion, service fee, ...) are reported under
+    'employer_cost' and are never subtracted from NET pay. field_codes with no entry in
+    spec.field_categories are ignored here (they're typically intermediate helper outputs,
+    not final salary components).
+    """
+    totals = {"line_items": 0.0, "deductions": 0.0, "employer_cost": 0.0}
+    breakdown: dict[str, dict[str, Any]] = {"line_items": {}, "deductions": {}, "employer_cost": {}}
+    field_categories = getattr(spec, "field_categories", {}) or {}
+    for field_code, value in outputs.items():
+        section = field_categories.get(field_code)
+        if section not in totals:
+            continue
+        totals[section] += value
+        breakdown[section][field_code] = value
+    return {"totals": totals, "breakdown": breakdown, "net_salary": totals["line_items"] - totals["deductions"]}
+
+
 def compile_formula(spec: "FormulaSpec") -> Callable[[dict[str, Any]], dict[str, Any]]:
     """
     Turn a reviewed FormulaSpec into a plain Python function.

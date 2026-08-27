@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from ..expression_evaluator import BUILTIN_FUNCTIONS
-from .formula_schema import ALLOWED_SECTIONS, FormulaCandidate
+from .formula_schema import ALLOWED_SECTIONS, DEDUCTION_CATEGORIES, FormulaCandidate, FormulaSpec
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,7 @@ class ValidationContext:
 class ValidationResult:
     passed: bool
     errors: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
 
 
 _ALLOWED_NODES = {ast.Expression, ast.BinOp, ast.UnaryOp, ast.BoolOp, ast.Compare,
@@ -30,7 +31,7 @@ _ALLOWED_NODES = {ast.Expression, ast.BinOp, ast.UnaryOp, ast.BoolOp, ast.Compar
 
 
 def validate_formula(candidate: FormulaCandidate, context: ValidationContext) -> ValidationResult:
-    spec, errors = candidate.proposed_spec, []
+    spec, errors, warnings = candidate.proposed_spec, [], []
     if candidate.company_id != spec.company_id: errors.append("candidate and proposed spec company_id do not match")
     if not spec.rules: errors.append("formula must contain at least one rule")
     variables = {variable.name: variable for variable in spec.variables}
@@ -48,6 +49,7 @@ def validate_formula(candidate: FormulaCandidate, context: ValidationContext) ->
 
     dependencies: dict[str, set[str]] = {}
     output_set = set(outputs)
+    rules_by_output = {rule.output_field: rule for rule in spec.rules}
     for rule in spec.rules:
         names = _validate_expression(rule.expression, rule.output_field, context.allowed_functions, errors)
         if rule.condition:
@@ -60,7 +62,37 @@ def validate_formula(candidate: FormulaCandidate, context: ValidationContext) ->
     if not errors:
         try: _topological_order(dependencies)
         except ValueError as exc: errors.append(str(exc))
-    return ValidationResult(not errors, tuple(errors))
+
+    _validate_net_consistency(spec, rules_by_output, errors, warnings)
+
+    return ValidationResult(not errors, tuple(errors), tuple(warnings))
+
+
+def _validate_net_consistency(spec: FormulaSpec, rules_by_output: dict[str, "object"],
+                              errors: list[str], warnings: list[str]) -> None:
+    """HR requirement: NET = tong thu nhap (line_items) - tong khau tru (BHXH + PIT +
+    khau tru khac). A field_categories mapping must agree with the category declared on
+    its own rule (BHXH/PIT/DEDUCTION_OTHER can only sit in 'deductions'; BASIC/ALLOWANCE/
+    BONUS/SALARY_OT can only sit in 'line_items'), and a formula that produces income
+    without any matching deduction bucket (or vice versa) can't express NET at all."""
+    sections_seen: set[str] = set()
+    for code, section in spec.field_categories.items():
+        sections_seen.add(section)
+        rule = rules_by_output.get(code)
+        if rule is None or rule.category is None:
+            continue
+        if section == "deductions" and rule.category not in DEDUCTION_CATEGORIES:
+            errors.append(f"NET consistency: {code} has category {rule.category} but is mapped to section "
+                         "'deductions' (expected BHXH/PIT/DEDUCTION_OTHER)")
+        if section == "line_items" and rule.category in DEDUCTION_CATEGORIES:
+            errors.append(f"NET consistency: {code} has category {rule.category} but is mapped to section "
+                         "'line_items' (a deduction cannot count as income)")
+    if sections_seen and "line_items" in sections_seen and "deductions" not in sections_seen:
+        warnings.append("formula declares income (line_items) but no deductions bucket; "
+                        "NET = income - deductions cannot be computed from this spec alone")
+    if sections_seen and "deductions" in sections_seen and "line_items" not in sections_seen:
+        warnings.append("formula declares deductions but no income (line_items) bucket; "
+                        "NET = income - deductions cannot be computed from this spec alone")
 
 
 def _validate_expression(expression: str, rule_code: str, allowed_functions: Iterable[str], errors: list[str]) -> set[str]:
