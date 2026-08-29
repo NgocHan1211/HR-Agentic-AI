@@ -187,10 +187,28 @@ def compile_formula(spec: "FormulaSpec") -> Callable[[dict[str, Any]], dict[str,
             if rule.condition and not safe_eval(rule.condition, scope):
                 continue
             value = safe_eval(rule.expression, scope)
-            if rule.rounding:
-                value = safe_eval(rule.rounding, {**scope, "value": value})
+            value = _apply_rounding(value, rule.rounding)
             outputs[rule.output_field] = value
 
         return outputs
 
     return run
+
+
+def _apply_rounding(value: Any, rounding: str | None) -> Any:
+    """Apply the same persisted rounding format accepted by formula_validator.
+
+    ``round_down_1000`` is metadata, not a Python expression; evaluating it as
+    an expression incorrectly looks for a variable named ``round_down_1000``.
+    """
+    if rounding is None:
+        return value
+    if rounding == "round":
+        return round(value)
+    prefix = "round_down_"
+    if rounding.startswith(prefix):
+        try:
+            return round_down(value, float(rounding.removeprefix(prefix)))
+        except ValueError as exc:
+            raise ValueError(f"invalid rounding rule: {rounding!r}") from exc
+    raise ValueError(f"unsupported rounding rule: {rounding!r}")
