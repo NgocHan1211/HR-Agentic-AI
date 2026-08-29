@@ -1,3 +1,35 @@
+# HR-Agentic-AI
+
+HR-Agentic-AI là dự án hỗ trợ xử lý chính sách nhân sự và tính lương theo hướng có thể kiểm tra. Hệ thống tập trung xây dựng các thành phần nền tảng để đọc tài liệu chính sách, chuẩn hóa dữ liệu lương/chấm công từ Excel, biểu diễn công thức lương có cấu trúc và thực hiện tính toán bằng rule engine an toàn.
+
+## Định hướng
+
+Các quy định lương thường nằm trong PDF/DOCX/TXT, trong khi dữ liệu đầu vào lại nằm ở nhiều file Excel với cấu trúc khác nhau. HR-Agentic-AI hướng tới việc kết nối hai nguồn này thành một quy trình có thể truy vết:
+
+```text
+Chính sách lương                    Dữ liệu Excel
+PDF / DOCX / TXT                    Lương / chấm công
+        │                                   │
+        ▼                                   ▼
+Parse → chuẩn hóa → chunking       Mapping → chuẩn hóa → validation
+        │                                   │
+        └──── FormulaSpec / rule engine ───┘
+                         │
+                         ▼
+              Payroll result → anomaly → export
+```
+
+Nguyên tắc quan trọng của dự án:
+
+- LLM không tự tính lương và không tự sửa số liệu.
+- Công thức được biểu diễn dưới dạng dữ liệu có cấu trúc (`FormulaSpec`) và được kiểm tra trước khi chạy.
+- Phép tính sử dụng evaluator xác định, giới hạn AST/hàm cho phép và không dùng `eval()` trực tiếp.
+- Các kết quả bất thường cần được đánh dấu để người dùng kiểm tra.
+
+## Chức năng hiện có
+
+### Xử lý tài liệu chính sách
+
 - Hỗ trợ đọc DOCX, PDF, TXT và Excel thông qua parser factory.
 - Chuẩn hóa Unicode/khoảng trắng và giữ metadata vị trí nguồn.
 - Chia nội dung theo heading/cấu trúc, có overlap để phục vụ truy xuất sau này.
