@@ -3,12 +3,17 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
+import time
 import unicodedata
+import urllib.error
+import urllib.request
 from typing import Any, Protocol
 from uuid import uuid4
 
-from .formula_schema import FormulaCandidate, FormulaRule, FormulaSpec, FormulaVariable
+from .formula_schema import (ComponentCategory, ComponentRole, DayType, FormulaCandidate, FormulaRule,
+                             FormulaSpec, FormulaVariable, OTAttributes, ShiftType)
 
 
 class FormulaExtractionError(RuntimeError): pass
@@ -24,15 +29,31 @@ def extract_formula(document_text: str, company_id: str, evidence_locations: lis
     if not document_text.strip(): raise ValueError("document_text is required")
     client = llm_client or _client_from_environment()
     system = ("You extract payroll formulas. Return only valid JSON with confidence (0..1), "
-              "calculation_basis, variables [{name,source,field_code?,value?,description?}], and rules "
-              "[{output_field,expression,condition?,rounding?,section?,description?}]. "
+              "calculation_basis, variables [{name,source,field_code?,value?,description?,category?,"
+              "role?,ot_attributes?}], and rules [{output_field,expression,condition?,rounding?,section?,"
+              "description?,category?,ot_attributes?}]. "
               "Sources must be employee, attendance, rate_config, regulatory, or literal. "
               "Use only arithmetic and prorate, round_down, tax_bracket_vn; never calculate a salary. "
               "Every `name` and `output_field` MUST be a valid Python identifier: lowercase ASCII "
               "letters, digits, underscores only, must not start with a digit, no spaces or accents "
               "(e.g. use 'luong_co_ban', not 'Lương cơ bản' or 'luong-co-ban'). "
+              "For `employee` and `attendance` variables, `field_code` is a lowercase ASCII snake_case "
+              "integration code in English (e.g. `basic_salary`, `total_working_days`), never a Vietnamese display label. "
               "`expression`/`condition` must reference variables and prior output_fields by that exact "
-              "identifier.")
+              "identifier. "
+              "`category` classifies the component using the shared salary-component menu: one of "
+              "BASIC, ALLOWANCE, WORKDAY, BONUS, BHXH, PIT, DEDUCTION_OTHER, SALARY_OT. "
+              "`role` says whether the field is a raw attendance count (`input_variable`, e.g. worked "
+              "days/hours from the timesheet) or a money amount the formula produces "
+              "(`salary_component`). "
+              "Rules whose category is BHXH, PIT, or DEDUCTION_OTHER MUST use section='deductions'; "
+              "rules whose category is BASIC, ALLOWANCE, BONUS, or SALARY_OT MUST use section='line_items'. "
+              "NET pay is always tong thu nhap (line_items) minus tong khau tru (deductions); never fold "
+              "a deduction into a line_items rule or vice versa. "
+              "For overtime, never invent a separate field per rate (e.g. `ot_hours_150`, "
+              "`ot_holiday_night_350`). Instead set category='SALARY_OT' and give "
+              "`ot_attributes: {shift_type: 'Day'|'Night', day_type: 'Normal'|'Rest'|'Holiday', "
+              "rate: 1.5|2.0|3.0}` so every overtime variant is described the same way.")
     try:
         raw_response = client.complete(system=system, user=document_text)
         payload = _parse_json_response(raw_response)
@@ -41,9 +62,7 @@ def extract_formula(document_text: str, company_id: str, evidence_locations: lis
     payload = _sanitize_identifiers(payload)
     try:
         variables = tuple(_variable_with_metadata(item) for item in payload.get("variables", []))
-        rules = tuple(FormulaRule(**{key: value for key, value in item.items()
-                                     if key in {"output_field", "expression", "condition", "rounding", "section", "description"}})
-                      for item in payload.get("rules", []))
+        rules = tuple(_rule_with_metadata(item) for item in payload.get("rules", []))
     except (ValueError, KeyError) as exc:
         raise FormulaExtractionError(
             f"LLM formula JSON failed schema validation after sanitization: {exc}. "
@@ -57,6 +76,81 @@ def extract_formula(document_text: str, company_id: str, evidence_locations: lis
 
 
 _NON_IDENTIFIER_RE = re.compile(r"[^0-9a-zA-Z_]+")
+
+# Canonical integration codes are English so that FormulaSpec, Excel mappings
+# and the engine use one stable contract.  Vietnamese aliases are accepted from
+# the LLM and converted at the boundary.
+_FIELD_CODE_ALIASES = {
+    "luong_co_ban": "basic_salary", "luong_cb": "basic_salary", "basic": "basic_salary",
+    "ngay_cong": "total_working_days", "so_ngay_cong": "total_working_days",
+    "ngay_cong_chuan": "standard_working_days", "cong_chuan": "standard_working_days",
+    "tang_ca": "salary_ot_day_normal_150", "gio_tang_ca": "salary_ot_day_normal_150", "ot": "salary_ot_day_normal_150",
+    "gio_ca_dem": "night_shift_hours", "ca_dem": "night_shift_hours",
+    "ngay_phep": "annual_leave_days", "phep_nam": "annual_leave_days",
+    "nghi_thai_san": "maternity_leave_days", "thai_san": "maternity_leave_days",
+}
+
+# Best-effort recognition of legacy per-rate OT field codes (OT_HOURS_150,
+# OT_DAY_SHIFT_150_HOURS, OT_HOLIDAY_NIGHT_SHIFT_350_HOURS, ...) so a document that still
+# talks about them collapses into the SALARY_OT(shift_type, day_type, rate) family instead
+# of creating a new one-off field_code per variant.
+_OT_KEYWORD_RE = re.compile(r"(^OT_)|(_OT$)|OVERTIME|TANG_?CA", re.IGNORECASE)
+_OT_RATE_RE = re.compile(r"(150|200|300)")
+_OT_NIGHT_RE = re.compile(r"NIGHT|CA_?DEM", re.IGNORECASE)
+_OT_HOLIDAY_RE = re.compile(r"HOLIDAY|NGAY_?LE|_LE(_|$)", re.IGNORECASE)
+_OT_REST_RE = re.compile(r"DAY_?OFF|NGAY_?NGHI|REST", re.IGNORECASE)
+
+
+def _infer_ot_attributes(*texts: str | None) -> OTAttributes | None:
+    """Detect OT shift_type/day_type/rate from a field_code/name/description, so legacy
+    per-rate OT codes still land on the canonical SALARY_OT component family."""
+    haystack = " ".join(t for t in texts if t)
+    if not haystack or not _OT_KEYWORD_RE.search(haystack):
+        return None
+    rate_match = _OT_RATE_RE.search(haystack)
+    if not rate_match:
+        return None
+    shift_type = ShiftType.NIGHT if _OT_NIGHT_RE.search(haystack) else ShiftType.DAY
+    if _OT_HOLIDAY_RE.search(haystack):
+        day_type = DayType.HOLIDAY
+    elif _OT_REST_RE.search(haystack):
+        day_type = DayType.REST
+    else:
+        day_type = DayType.NORMAL
+    try:
+        return OTAttributes(shift_type=shift_type, day_type=day_type, rate=float(rate_match.group(1)) / 100)
+    except ValueError:
+        return None
+
+
+def _canonical_field_code(raw_code: Any, source: str | None) -> Any:
+    """Translate known Vietnamese field aliases to the shared English contract."""
+    if source not in {"employee", "attendance"} or raw_code is None:
+        return raw_code
+    normalized = _slugify_identifier(str(raw_code), set())
+    return _FIELD_CODE_ALIASES.get(normalized, normalized)
+
+
+def _parse_category(raw: Any) -> ComponentCategory | None:
+    if raw is None: return None
+    try: return ComponentCategory(str(raw).strip().upper())
+    except ValueError: return None  # unknown category from the LLM; leave uncategorized rather than fail extraction
+
+
+def _parse_role(raw: Any) -> ComponentRole | None:
+    if raw is None: return None
+    try: return ComponentRole(str(raw).strip().lower())
+    except ValueError: return None
+
+
+def _parse_ot_attributes(raw: Any) -> OTAttributes | None:
+    if not isinstance(raw, dict): return None
+    try:
+        return OTAttributes(shift_type=ShiftType(str(raw.get("shift_type", "")).strip().title()),
+                            day_type=DayType(str(raw.get("day_type", "")).strip().title()),
+                            rate=float(raw.get("rate")))
+    except (TypeError, ValueError):
+        return None
 
 
 def _slugify_identifier(raw_name: str, used: set[str]) -> str:
@@ -104,6 +198,7 @@ def _sanitize_identifiers(payload: dict[str, Any]) -> dict[str, Any]:
     for item in payload.get("variables", []):
         item = dict(item)
         item["name"] = resolve(item.get("name", ""))
+        item["field_code"] = _canonical_field_code(item.get("field_code"), item.get("source"))
         variables.append(item)
 
     rules = []
@@ -120,8 +215,31 @@ def _sanitize_identifiers(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _variable_with_metadata(item: dict[str, Any]) -> FormulaVariable:
+    ot_attributes = _parse_ot_attributes(item.get("ot_attributes"))
+    category = _parse_category(item.get("category"))
+    if ot_attributes is None and category is None:
+        ot_attributes = _infer_ot_attributes(item.get("field_code"), item.get("name"), item.get("description"))
+        if ot_attributes is not None:
+            category = ComponentCategory.SALARY_OT
+    elif ot_attributes is not None and category is None:
+        category = ComponentCategory.SALARY_OT
     return FormulaVariable(name=item["name"], source=item["source"], field_code=item.get("field_code"),
-                           value=item.get("value"), description=item.get("description", ""))
+                           value=item.get("value"), description=item.get("description", ""),
+                           category=category, role=_parse_role(item.get("role")), ot_attributes=ot_attributes)
+
+
+def _rule_with_metadata(item: dict[str, Any]) -> FormulaRule:
+    ot_attributes = _parse_ot_attributes(item.get("ot_attributes"))
+    category = _parse_category(item.get("category"))
+    if ot_attributes is None and category is None:
+        ot_attributes = _infer_ot_attributes(item.get("output_field"), item.get("description"))
+        if ot_attributes is not None:
+            category = ComponentCategory.SALARY_OT
+    elif ot_attributes is not None and category is None:
+        category = ComponentCategory.SALARY_OT
+    return FormulaRule(**{key: value for key, value in item.items()
+                          if key in {"output_field", "expression", "condition", "rounding", "section", "description"}},
+                       category=category, ot_attributes=ot_attributes)
 
 
 def _parse_json_response(raw_response: str) -> dict[str, Any]:
@@ -143,27 +261,109 @@ def _parse_json_response(raw_response: str) -> dict[str, Any]:
 def formula_to_engine_dict(spec: FormulaSpec) -> dict[str, Any]:
     return {"formula_id": spec.formula_id, "company_id": spec.company_id, "calculation_basis": spec.calculation_basis,
             "status": spec.status.value, "variables": [{"name": item.name, "source": item.source,
-              "field_code": item.field_code, "value": item.value} for item in spec.variables],
+              "field_code": item.field_code, "value": item.value,
+              "category": item.category.value if item.category else None,
+              "role": item.role.value if item.role else None} for item in spec.variables],
             "rules": [rule.__dict__ for rule in spec.rules], "field_categories": spec.field_categories}
 
 
-class OpenAICompletionClient:
-    def __init__(self, client: Any, model: str) -> None: self.client, self.model = client, model
-    @classmethod
-    def from_environment(cls) -> "OpenAICompletionClient":
-        if not os.environ.get("OPENAI_API_KEY"): raise FormulaExtractionError("OPENAI_API_KEY is not configured")
-        try:
-            from openai import OpenAI
-        except ImportError as exc: raise FormulaExtractionError("install openai to use LLM extraction") from exc
-        return cls(OpenAI(), os.getenv("OPENAI_FORMULA_MODEL", "gpt-4.1-mini"))
+class GemmaAPICompletionClient:
+    """Calls a hosted Gemma model over HTTP instead of running Qwen locally.
+
+    Uses the Gemini-API-compatible `generateContent` endpoint (Google AI Studio /
+    Vertex-style REST shape), pointed at a Gemma model id. Configure via env vars:
+
+    - GEMMA_API_KEY  (required): API key for the endpoint.
+    - GEMMA_MODEL    (optional): defaults to "gemma-4-31b-it".
+    - GEMMA_API_URL  (optional): defaults to the Google Generative Language API base;
+      point this at a different Gemma-compatible endpoint (e.g. an internal gateway) if
+      needed, without changing any calling code.
+    - GEMMA_TIMEOUT_SECONDS (optional): defaults to 60.
+    - GEMMA_MAX_RETRIES (optional): defaults to 3. Retries only on 429 (rate limit) and
+      5xx (transient server error); never retries 4xx errors like an invalid API key.
+    - GEMMA_RETRY_BASE_DELAY_SECONDS (optional): defaults to 2. Exponential backoff base;
+      a server-provided Retry-After header, when present, always takes priority.
+    """
+
+    _DEFAULT_API_URL = "https://generativelanguage.googleapis.com/v1beta"
+    _DEFAULT_MODEL = "gemma-4-31b-it"
+    _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+    def __init__(self, api_key: str, model: str | None = None, api_url: str | None = None,
+                 timeout_seconds: float = 60.0, max_retries: int = 3, retry_base_delay_seconds: float = 2.0) -> None:
+        if not api_key: raise RuntimeError("GEMMA_API_KEY is required to call the Gemma API")
+        self._api_key = api_key
+        self._model = model or self._DEFAULT_MODEL
+        self._api_url = (api_url or self._DEFAULT_API_URL).rstrip("/")
+        self._timeout_seconds = timeout_seconds
+        self._max_retries = max(0, max_retries)
+        self._retry_base_delay_seconds = retry_base_delay_seconds
+
     def complete(self, *, system: str, user: str) -> str:
-        response = self.client.chat.completions.create(model=self.model, temperature=0,
-            response_format={"type": "json_object"}, messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
-        return response.choices[0].message.content or "{}"
+        url = f"{self._api_url}/models/{self._model}:generateContent"
+        body = {
+            "system_instruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": [{"text": user}]}],
+            "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
+        }
+        request = urllib.request.Request(
+            url, data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json", "x-goog-api-key": self._api_key}, method="POST",
+        )
+        payload = self._request_with_retry(request)
+        try:
+            parts = payload["candidates"][0]["content"]["parts"]
+            return "".join(part.get("text", "") for part in parts)
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError(f"unexpected Gemma API response shape: {payload!r}") from exc
+
+    def _request_with_retry(self, request: urllib.request.Request) -> dict[str, Any]:
+        last_error: urllib.error.HTTPError | None = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=self._timeout_seconds) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                last_error = exc
+                if exc.code not in self._RETRYABLE_STATUS_CODES or attempt == self._max_retries:
+                    raise RuntimeError(self._error_message(exc)) from exc
+                time.sleep(self._retry_delay_seconds(exc, attempt))
+            except urllib.error.URLError as exc:
+                raise RuntimeError(f"Gemma API request failed: {exc}") from exc
+        raise RuntimeError(self._error_message(last_error)) from last_error  # pragma: no cover - defensive
+
+    def _retry_delay_seconds(self, exc: urllib.error.HTTPError, attempt: int) -> float:
+        retry_after = exc.headers.get("Retry-After") if exc.headers else None
+        if retry_after:
+            try:
+                return max(0.0, float(retry_after))
+            except ValueError:
+                pass  # Retry-After can also be an HTTP-date; fall back to backoff below.
+        return self._retry_base_delay_seconds * (2 ** attempt) + random.uniform(0, 1)
+
+    @staticmethod
+    def _error_message(exc: urllib.error.HTTPError | None) -> str:
+        if exc is None:
+            return "Gemma API request failed"  # pragma: no cover - defensive
+        if exc.code == 429:
+            return ("Gemma API rate limit (HTTP 429): da vuot qua so request/quota cho phep. "
+                    "Kiem tra han muc (rate limit/quota) cua API key tai noi cap Gemma API, "
+                    "giam tan suat bam trich xuat lien tuc, hoac tang GEMMA_MAX_RETRIES / "
+                    "GEMMA_RETRY_BASE_DELAY_SECONDS de tu dong cho lau hon giua cac lan thu lai.")
+        if exc.code in (401, 403):
+            return f"Gemma API auth error (HTTP {exc.code}): kiem tra lai GEMMA_API_KEY co dung va con hieu luc khong."
+        return f"Gemma API request failed: HTTP {exc.code} {exc.reason}"
 
 
 def _client_from_environment() -> CompletionClient:
-    if os.getenv("FORMULA_LLM_BACKEND") in {"transformers", "vllm"}:
-        from .local_llm import QwenLocalCompletionClient
-        return QwenLocalCompletionClient()
-    return OpenAICompletionClient.from_environment()
+    """Use the hosted Gemma API for every formula-extraction request (replaces the
+    previous local Qwen runtime). Requires GEMMA_API_KEY; see GemmaAPICompletionClient
+    for the full set of environment variables."""
+    api_key = os.environ.get("GEMMA_API_KEY")
+    if not api_key:
+        raise FormulaExtractionError("GEMMA_API_KEY is not set; cannot reach the Gemma API for formula extraction")
+    return GemmaAPICompletionClient(api_key=api_key, model=os.environ.get("GEMMA_MODEL"),
+                                    api_url=os.environ.get("GEMMA_API_URL"),
+                                    timeout_seconds=float(os.environ.get("GEMMA_TIMEOUT_SECONDS", "60")),
+                                    max_retries=int(os.environ.get("GEMMA_MAX_RETRIES", "3")),
+                                    retry_base_delay_seconds=float(os.environ.get("GEMMA_RETRY_BASE_DELAY_SECONDS", "2")))
