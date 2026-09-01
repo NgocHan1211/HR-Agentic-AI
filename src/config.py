@@ -17,9 +17,13 @@ CHUNK_OVERLAP_MIN_SIZE = 50  # Minimum chunk size to apply overlap
 
 # Retriever configuration
 EMBEDDING_MODEL = "BAAI/bge-m3"
-VECTOR_SIZE = 1024
 RERANKER_MODEL = "AITeamVN/Vietnamese_Reranker"
 TOP_K = 5
+
+# Qdrant configuration
+VECTOR_SIZE = 1024
+QDRANT_HOST = "localhost"
+QDRANT_PORT = 6333
 
 # Excel parser configuration
 EXCEL_MAX_SCAN_ROWS = 20000
