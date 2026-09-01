@@ -2,9 +2,9 @@ from __future__ import annotations
 from rank_bm25 import BM25Okapi
 from underthesea import word_tokenize
 
-from ..policy_update.chunking.chunk_metadata import Chunk
+from policy_update.chunking.chunk_metadata import Chunk
 from .models import RetrievedChunk, RetrievalResult
-from ..config import TOP_K
+from config import TOP_K
 
 class BM25Retriever:
     """BM25-based lexical retriever over document chunks."""
@@ -49,11 +49,19 @@ class BM25Retriever:
         top_k = min(top_k, len(self.chunks))
         threshold = 0.0
         top_indices = [i for i, s in enumerate(scores) if s > threshold]
-        
+
         if not top_indices:
             return RetrievalResult(query=query, results=[])
-        
-        top_indices = sorted(range(len(scores)), key=lambda index: scores[index], reverse=True,)[:top_k]
-        retrieved_chunks = [RetrievedChunk(chunk=self.chunks[index], score=float(scores[index]), retriever="bm25",) for index in top_indices]
 
-        return RetrievalResult(query=query, results=retrieved_chunks,)
+        top_indices = sorted(top_indices, key=lambda index: scores[index], reverse=True)[:top_k]
+
+        retrieved_chunks = [
+            RetrievedChunk(
+                chunk=self.chunks[index],
+                score=float(scores[index]),
+                retriever="BM25Retriever",
+            )
+            for index in top_indices
+        ]
+
+        return RetrievalResult(query=query, results=retrieved_chunks)
