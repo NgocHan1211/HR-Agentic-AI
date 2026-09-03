@@ -53,12 +53,17 @@ def extract_formula(document_text: str, company_id: str, evidence_locations: lis
               "For overtime, never invent a separate field per rate (e.g. `ot_hours_150`, "
               "`ot_holiday_night_350`). Instead set category='SALARY_OT' and give "
               "`ot_attributes: {shift_type: 'Day'|'Night', day_type: 'Normal'|'Rest'|'Holiday', "
-              "rate: 1.5|2.0|3.0}` so every overtime variant is described the same way.")
+              "rate: 1.5|2.0|2.7|3.0|3.9}` so every overtime variant is described the same way. "
+              "Use a SALARY_OT category only for one concrete OT variant with ot_attributes; "
+              "do not label aggregate totals such as total_overtime as SALARY_OT.")
     try:
         raw_response = client.complete(system=system, user=document_text)
+    except (OSError, RuntimeError) as exc:
+        raise FormulaExtractionError(f"LLM extraction request failed: {str(exc)[:500]}") from exc
+    try:
         payload = _parse_json_response(raw_response)
-    except (json.JSONDecodeError, OSError, RuntimeError) as exc:
-        raise FormulaExtractionError(f"LLM did not return valid formula JSON: {str(exc)[:240]}") from exc
+    except json.JSONDecodeError as exc:
+        raise FormulaExtractionError(f"LLM did not return valid formula JSON: {str(exc)[:500]}") from exc
     payload = _sanitize_identifiers(payload)
     try:
         variables = tuple(_variable_with_metadata(item) for item in payload.get("variables", []))
@@ -237,6 +242,14 @@ def _rule_with_metadata(item: dict[str, Any]) -> FormulaRule:
             category = ComponentCategory.SALARY_OT
     elif ot_attributes is not None and category is None:
         category = ComponentCategory.SALARY_OT
+    # An aggregate such as ``tong_luong_ot`` is a total of concrete OT rules,
+    # not an OT variant itself.  Free models often label it SALARY_OT but omit
+    # shift/day/rate.  Preserve the rule while leaving it unclassified so the
+    # review screen can show it for a human to approve or reject.
+    if category is ComponentCategory.SALARY_OT and ot_attributes is None:
+        output = str(item.get("output_field", "")).lower()
+        if output.startswith(("tong_", "total_")):
+            category = None
     return FormulaRule(**{key: value for key, value in item.items()
                           if key in {"output_field", "expression", "condition", "rounding", "section", "description"}},
                        category=category, ot_attributes=ot_attributes)
@@ -302,7 +315,8 @@ class GemmaAPICompletionClient:
     def complete(self, *, system: str, user: str) -> str:
         url = f"{self._api_url}/models/{self._model}:generateContent"
         body = {
-            "system_instruction": {"parts": [{"text": system}]},
+            # Gemini REST JSON uses camelCase, not the Python SDK's snake_case.
+            "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": user}]}],
             "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
         }
@@ -345,23 +359,107 @@ class GemmaAPICompletionClient:
     def _error_message(exc: urllib.error.HTTPError | None) -> str:
         if exc is None:
             return "Gemma API request failed"  # pragma: no cover - defensive
+        try:
+            details = exc.read().decode("utf-8", errors="replace").strip()
+        except OSError:
+            details = ""
+        detail_suffix = f": {details[:500]}" if details else ""
         if exc.code == 429:
             return ("Gemma API rate limit (HTTP 429): da vuot qua so request/quota cho phep. "
                     "Kiem tra han muc (rate limit/quota) cua API key tai noi cap Gemma API, "
                     "giam tan suat bam trich xuat lien tuc, hoac tang GEMMA_MAX_RETRIES / "
-                    "GEMMA_RETRY_BASE_DELAY_SECONDS de tu dong cho lau hon giua cac lan thu lai.")
+                    "GEMMA_RETRY_BASE_DELAY_SECONDS de tu dong cho lau hon giua cac lan thu lai."
+                    f"{detail_suffix}")
         if exc.code in (401, 403):
-            return f"Gemma API auth error (HTTP {exc.code}): kiem tra lai GEMMA_API_KEY co dung va con hieu luc khong."
-        return f"Gemma API request failed: HTTP {exc.code} {exc.reason}"
+            return (f"Gemma API auth error (HTTP {exc.code}): kiem tra lai GEMMA_API_KEY co dung "
+                    f"va con hieu luc khong.{detail_suffix}")
+        return f"Gemma API request failed: HTTP {exc.code} {exc.reason}{detail_suffix}"
+
+
+class OpenRouterCompletionClient:
+    """OpenAI-compatible client for OpenRouter, including its free-model router."""
+
+    _DEFAULT_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+    _DEFAULT_MODEL = "openrouter/free"
+
+    def __init__(self, api_key: str, model: str | None = None, api_url: str | None = None,
+                 timeout_seconds: float = 60.0) -> None:
+        if not api_key:
+            raise RuntimeError("OPENROUTER_API_KEY is required to call OpenRouter")
+        self._api_key = api_key
+        self._model = model or self._DEFAULT_MODEL
+        self._api_url = (api_url or self._DEFAULT_API_URL).rstrip("/")
+        self._timeout_seconds = timeout_seconds
+
+    def complete(self, *, system: str, user: str) -> str:
+        body = {
+            "model": self._model,
+            "temperature": 0,
+            # Free Router can otherwise select a safety/classifier model that
+            # returns prose (for example "User Safety: safe") instead of a
+            # completion. Require the OpenAI-compatible JSON-object mode.
+            "response_format": {"type": "json_object"},
+            # Some providers silently ignore unsupported parameters unless this
+            # flag is set.  Do not route FormulaSpec extraction to them.
+            "provider": {"require_parameters": True},
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        request = urllib.request.Request(
+            self._api_url,
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self._api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout_seconds) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            try:
+                details = exc.read().decode("utf-8", errors="replace").strip()
+            except OSError:
+                details = ""
+            suffix = f": {details[:500]}" if details else ""
+            raise RuntimeError(f"OpenRouter API request failed: HTTP {exc.code} {exc.reason}{suffix}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"OpenRouter API request failed: {exc}") from exc
+
+        try:
+            choice = payload["choices"][0]
+            message = choice["message"]
+            content = message.get("content")
+            if not isinstance(content, str) or not content.strip():
+                raise RuntimeError(
+                    "OpenRouter returned an empty completion "
+                    f"(model={payload.get('model')!r}, finish_reason={choice.get('finish_reason')!r}, "
+                    f"message={message!r})"
+                )
+            return content
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError(f"unexpected OpenRouter API response shape: {payload!r}") from exc
 
 
 def _client_from_environment() -> CompletionClient:
-    """Use the hosted Gemma API for every formula-extraction request (replaces the
-    previous local Qwen runtime). Requires GEMMA_API_KEY; see GemmaAPICompletionClient
-    for the full set of environment variables."""
+    """Select OpenRouter first, then the optional hosted Gemma fallback."""
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+    if openrouter_key:
+        return OpenRouterCompletionClient(
+            api_key=openrouter_key,
+            model=os.environ.get("OPENROUTER_MODEL"),
+            api_url=os.environ.get("OPENROUTER_API_URL"),
+            timeout_seconds=float(os.environ.get("OPENROUTER_TIMEOUT_SECONDS", "60")),
+        )
+
     api_key = os.environ.get("GEMMA_API_KEY")
     if not api_key:
-        raise FormulaExtractionError("GEMMA_API_KEY is not set; cannot reach the Gemma API for formula extraction")
+        raise FormulaExtractionError(
+            "No LLM API key is configured. Set OPENROUTER_API_KEY (recommended) or GEMMA_API_KEY."
+        )
     return GemmaAPICompletionClient(api_key=api_key, model=os.environ.get("GEMMA_MODEL"),
                                     api_url=os.environ.get("GEMMA_API_URL"),
                                     timeout_seconds=float(os.environ.get("GEMMA_TIMEOUT_SECONDS", "60")),

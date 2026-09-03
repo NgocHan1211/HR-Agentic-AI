@@ -1,6 +1,7 @@
 """Streamlit demo for Policy -> LLM FormulaSpec -> Human Review.
 
-Run from the repository root after configuring OPENAI_API_KEY:
+Run from the repository root after configuring OPENROUTER_API_KEY
+(or GEMMA_API_KEY as a fallback):
     py -3.10 -m streamlit run formula_review_demo.py
 """
 from __future__ import annotations
@@ -113,6 +114,14 @@ def candidate_json(candidate) -> str:
     return json.dumps(asdict(candidate.proposed_spec), ensure_ascii=False, indent=2, default=str)
 
 
+def configured_llm() -> tuple[str, str] | None:
+    if os.getenv("OPENROUTER_API_KEY"):
+        return "openrouter-free", os.getenv("OPENROUTER_MODEL", "openrouter/free")
+    if os.getenv("GEMMA_API_KEY"):
+        return "gemma-api", os.getenv("GEMMA_MODEL", "gemma-4-31b-it")
+    return None
+
+
 if "formula_store" not in st.session_state:
     st.session_state.formula_store = FormulaCandidateStore()
 if "formula_candidate" not in st.session_state:
@@ -140,13 +149,16 @@ sample_json = st.text_area(
 )
 policy_file = st.file_uploader("Upload policy PDF / DOCX / TXT", type=["pdf", "docx", "txt"])
 
-if not os.getenv("OPENAI_API_KEY"):
-    st.warning("Chưa thấy OPENAI_API_KEY. Bạn vẫn có thể parse policy, nhưng chưa thể gọi LLM để extract FormulaSpec.")
+llm = configured_llm()
+if llm is None:
+    st.warning(
+        "Chưa thấy OPENROUTER_API_KEY hoặc GEMMA_API_KEY. Bạn vẫn có thể parse policy, "
+        "nhưng chưa thể gọi AI để extract FormulaSpec."
+    )
 else:
     st.caption(
         "LLM extraction đã sẵn sàng · "
-        f"backend: {os.getenv('FORMULA_LLM_BACKEND', 'openai')} · "
-        f"model: {os.getenv('OPENAI_FORMULA_MODEL', 'gpt-4.1-mini')}"
+        f"backend: {llm[0]} · model: {llm[1]}"
     )
 
 if policy_file is not None:
@@ -159,8 +171,8 @@ if policy_file is not None:
             st.text(document_text[:8_000] or "Không trích xuất được nội dung text.")
 
         if st.button("Trích xuất FormulaSpec bằng AI", type="primary"):
-            if not os.getenv("OPENAI_API_KEY") and not os.getenv("FORMULA_LLM_BACKEND"):
-                raise ValueError("Chưa cấu hình LLM. Hãy đặt OPENAI_API_KEY hoặc FORMULA_LLM_BACKEND.")
+            if configured_llm() is None:
+                raise ValueError("Chưa cấu hình AI. Hãy đặt OPENROUTER_API_KEY hoặc GEMMA_API_KEY.")
             if not company_id.strip():
                 raise ValueError("Company ID là bắt buộc.")
             context = context_from_inputs(field_codes_text)
@@ -188,6 +200,16 @@ context = st.session_state.get("formula_context")
 if candidate is not None and context is not None:
     st.divider()
     st.header("Formula review")
+    st.caption(
+        "Đã thay đổi Allowed output field codes? Áp dụng lại danh mục bên trên cho FormulaSpec hiện tại "
+        "mà không cần gọi AI thêm lần nữa."
+    )
+    if st.button("Validate lại với field code hiện tại"):
+        try:
+            st.session_state.formula_context = context_from_inputs(field_codes_text)
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
     validation = validate_formula(candidate, context)
     if validation.passed:
         st.success("FormulaSpec đã qua deterministic validation.")

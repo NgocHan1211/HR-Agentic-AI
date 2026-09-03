@@ -46,6 +46,7 @@ from .formula_extractor import (
     CompletionClient,
     FormulaExtractionError,
     GemmaAPICompletionClient,
+    OpenRouterCompletionClient,
     extract_formula,
     formula_to_engine_dict,
 )
@@ -99,6 +100,7 @@ __all__ = [
     "CompletionClient",
     "FormulaExtractionError",
     "GemmaAPICompletionClient",
+    "OpenRouterCompletionClient",
     "extract_formula",
     "formula_to_engine_dict",
     # validation

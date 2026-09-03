@@ -151,6 +151,31 @@ def safe_eval(expression: str, env: dict[str, Any]) -> Any:
     return _eval_node(tree, env)
 
 
+def summarize_by_section(spec: "FormulaSpec", outputs: dict[str, Any]) -> dict[str, Any]:
+    """
+    Group the rule outputs of a compiled formula run by accounting section
+    (spec.field_categories: field_code -> 'line_items' | 'deductions' | 'employer_cost')
+    and compute NET pay:
+
+        NET = tong thu nhap (line_items) - tong khau tru (deductions: BHXH + PIT + khac)
+
+    Employer-side costs (BHXH company portion, service fee, ...) are reported under
+    'employer_cost' and are never subtracted from NET pay. field_codes with no entry in
+    spec.field_categories are ignored here (they're typically intermediate helper outputs,
+    not final salary components).
+    """
+    totals = {"line_items": 0.0, "deductions": 0.0, "employer_cost": 0.0}
+    breakdown: dict[str, dict[str, Any]] = {"line_items": {}, "deductions": {}, "employer_cost": {}}
+    field_categories = getattr(spec, "field_categories", {}) or {}
+    for field_code, value in outputs.items():
+        section = field_categories.get(field_code)
+        if section not in totals:
+            continue
+        totals[section] += value
+        breakdown[section][field_code] = value
+    return {"totals": totals, "breakdown": breakdown, "net_salary": totals["line_items"] - totals["deductions"]}
+
+
 def compile_formula(spec: "FormulaSpec") -> Callable[[dict[str, Any]], dict[str, Any]]:
     """
     Turn a reviewed FormulaSpec into a plain Python function.
@@ -187,28 +212,10 @@ def compile_formula(spec: "FormulaSpec") -> Callable[[dict[str, Any]], dict[str,
             if rule.condition and not safe_eval(rule.condition, scope):
                 continue
             value = safe_eval(rule.expression, scope)
-            value = _apply_rounding(value, rule.rounding)
+            if rule.rounding:
+                value = safe_eval(rule.rounding, {**scope, "value": value})
             outputs[rule.output_field] = value
 
         return outputs
 
     return run
-
-
-def _apply_rounding(value: Any, rounding: str | None) -> Any:
-    """Apply the same persisted rounding format accepted by formula_validator.
-
-    ``round_down_1000`` is metadata, not a Python expression; evaluating it as
-    an expression incorrectly looks for a variable named ``round_down_1000``.
-    """
-    if rounding is None:
-        return value
-    if rounding == "round":
-        return round(value)
-    prefix = "round_down_"
-    if rounding.startswith(prefix):
-        try:
-            return round_down(value, float(rounding.removeprefix(prefix)))
-        except ValueError as exc:
-            raise ValueError(f"invalid rounding rule: {rounding!r}") from exc
-    raise ValueError(f"unsupported rounding rule: {rounding!r}")
