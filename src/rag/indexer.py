@@ -10,6 +10,7 @@ class Indexer:
         self.dense_retriever = DenseRetriever()
         self.bm25_retriever: BM25Retriever | None = None
         self.hybrid_retriever: HybridRetriever | None = None
+        self._all_chunks: list = []
 
     def index_document(self, parsed_doc: Any) -> None:
         """Chunk document một lần, dùng cho cả Dense và BM25."""
@@ -17,7 +18,8 @@ class Indexer:
         chunk_batch = chunker.chunk(parsed_doc)
 
         self.dense_retriever.add_chunks(chunk_batch.chunks)
-        self.bm25_retriever = BM25Retriever(chunks=chunk_batch.chunks)
+        self._all_chunks.extend(chunk_batch.chunks)
+        self.bm25_retriever = BM25Retriever(chunks=self._all_chunks)
         self.hybrid_retriever = HybridRetriever(self.dense_retriever, self.bm25_retriever)
 
     def get_dense_retriever(self) -> DenseRetriever:
