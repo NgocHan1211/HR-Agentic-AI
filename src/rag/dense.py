@@ -9,7 +9,42 @@ from dataclasses import asdict
 from .models import RetrievedChunk, RetrievalResult
 from infrastructure.vector.qdrant import create_collection, COLLECTION_NAME
 from policy_update.chunking.structure_chunker import StructureChunker, Chunk
+from policy_update.chunking.chunk_metadata import HeadingContext
+from policy_update.parsers.base_parser import BlockType, Persistence, SourceLocation, SourceRef
 from config import EMBEDDING_MODEL, TOP_K, QDRANT_HOST, QDRANT_PORT
+
+def _deserialize_chunk(payload: dict) -> Chunk:
+    """Dựng lại Chunk từ payload lưu trong Qdrant. """
+
+    raw_source_ref = payload.get("source_ref") or {}
+    source_ref = SourceRef(
+        source_id=raw_source_ref.get("source_id"),
+        display_name=raw_source_ref.get("display_name"),
+        persistence=Persistence(raw_source_ref.get("persistence")),
+        stored_document_id=raw_source_ref.get("stored_document_id"),
+    )
+
+    raw_location = payload.get("location") or {}
+    location = SourceLocation(**raw_location)
+
+    raw_heading = payload.get("heading_context") or {}
+    heading_context = HeadingContext(**raw_heading)
+
+    block_types = [BlockType(bt) for bt in payload.get("block_types", [])]
+
+    return Chunk(
+        chunk_id=payload.get("chunk_id"),
+        source_ref=source_ref,
+        text=payload.get("text"),
+        block_ids=payload.get("block_ids", []),
+        root_block_ids=payload.get("root_block_ids", []),
+        location=location,
+        heading_context=heading_context,
+        block_types=block_types,
+        char_count=payload.get("char_count", len(payload.get("text", ""))),
+        order=payload.get("order", 0),
+        metadata=payload.get("metadata", {}),
+    )
 
 class DenseRetriever:
     def __init__(self):
@@ -52,29 +87,16 @@ class DenseRetriever:
         
     def retrieve(self, query: str, top_k: int = TOP_K) -> RetrievalResult:
         query_embedding = self.model.encode(query).tolist()
-        search_result = self.client.search(
+        search_result = self.client.query_points(
             collection_name=COLLECTION_NAME,
-            query_vector=query_embedding,
+            query=query_embedding,
             limit=top_k
-        )
+        ).points
 
         results: List[RetrievedChunk] = []
         for hit in search_result:
             payload = hit.payload
-
-            chunk_obj = Chunk(
-                chunk_id=payload.get("chunk_id"),
-                source_ref=payload.get("source_ref"),
-                text=payload.get("text"),
-                block_ids=payload.get("block_ids", []),
-                root_block_ids=payload.get("root_block_ids", []),
-                location=payload.get("location"),
-                heading_context=payload.get("heading_context"),
-                block_types=payload.get("block_types", []),
-                char_count=payload.get("char_count", len(payload.get("text", ""))),
-                order=payload.get("order", 0),
-                metadata=payload.get("metadata", {})
-            )
+            chunk_obj = _deserialize_chunk(payload)
 
             retrieved_chunk = RetrievedChunk(
                 chunk=chunk_obj,
