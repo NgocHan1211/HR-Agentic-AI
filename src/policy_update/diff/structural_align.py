@@ -6,9 +6,9 @@ from .models import ChangeType, Section, SectionDiff, TextOpType
 from .text_diff import diff_text, text_similarity
 
 try:
-    from ...config import DIFF_SECTION_RENAME_SIMILARITY_THRESHOLD
+    from ...config import DIFF_SECTION_RENAME_SIMILARITY_THRESHOLD, DIFF_MAX_FUZZY_MATCH_PRODUCT
 except ImportError:
-    from config import DIFF_SECTION_RENAME_SIMILARITY_THRESHOLD
+    from config import DIFF_SECTION_RENAME_SIMILARITY_THRESHOLD, DIFF_MAX_FUZZY_MATCH_PRODUCT
 
 def build_sections(doc: ParsedDocument) -> list[Section]:
     """
@@ -111,7 +111,26 @@ def _match_within_opcode(old_chunk: list[Section], new_chunk: list[Section]) -> 
     như giữ nguyên, thay vì kết luận vội REMOVED+ADDED riêng biệt. Dưới
     ngưỡng DIFF_SECTION_RENAME_SIMILARITY_THRESHOLD thì coi là 2 mục khác
     hẳn nhau (không phải đổi tên), giữ REMOVED/ADDED như matcher gốc.
+
+    Đây là vòng lặp O(len(old_chunk) * len(new_chunk)) — mỗi cặp cần 1 lần
+    text_similarity() (difflib.SequenceMatcher trên TOÀN BỘ text của section,
+    có thể dài). Với 1 policy bình thường (vài chục section) chi phí này
+    không đáng kể, nhưng nếu 1 đợt cập nhật xáo trộn RẤT NHIỀU section cùng
+    lúc (toàn bộ tài liệu viết lại, không còn heading nào khớp trực tiếp ->
+    cả tài liệu rơi vào 1 opcode replace duy nhất), tích len(old)*len(new)
+    có thể lớn bất thường. DIFF_MAX_FUZZY_MATCH_PRODUCT chặn chi phí này:
+    vượt ngưỡng thì bỏ qua fuzzy-match (không cố đoán section nào đổi tên
+    thành section nào), coi thẳng old_chunk là REMOVED và new_chunk là
+    ADDED — kết quả diff kém "thông minh" hơn (không phát hiện đổi tên)
+    nhưng vẫn ĐÚNG dữ liệu (không thiếu, không thừa section nào), chỉ mất
+    khả năng ghép cặp.
     """
+
+    if len(old_chunk) * len(new_chunk) > DIFF_MAX_FUZZY_MATCH_PRODUCT:
+        return [
+            *(SectionDiff(change_type=ChangeType.REMOVED, old_section=s, new_section=None) for s in old_chunk),
+            *(SectionDiff(change_type=ChangeType.ADDED, old_section=None, new_section=s) for s in new_chunk),
+        ]
 
     diffs: list[SectionDiff] = []
     remaining_new = list(enumerate(new_chunk))  

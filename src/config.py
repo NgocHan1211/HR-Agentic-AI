@@ -34,6 +34,7 @@ EXCEL_TABLE_BLANK_GAP_ROWS = 30
 
 # Policy diff engine
 DIFF_SECTION_RENAME_SIMILARITY_THRESHOLD = 0.5 # Ngưỡng độ giống nội dung (0..1, theo difflib.SequenceMatcher.ratio) để 2 section không trùng tiêu đề vẫn được coi là "cùng 1 mục bị đổi tên" thay vì bị kết luận REMOVED+ADDED riêng biệt.
+DIFF_MAX_FUZZY_MATCH_PRODUCT = 2500 # Chặn chi phí O(n*m) của fuzzy-match theo nội dung trong structural_align._match_within_opcode: len(old_chunk)*len(new_chunk) vượt ngưỡng này thì bỏ qua ghép cặp theo nội dung, coi thẳng là REMOVED+ADDED (vẫn đúng dữ liệu, chỉ mất khả năng phát hiện đổi tên).
 
 # RAG adapter — over-fetch trước khi access_filter lọc
 # BM25Retriever/DenseRetriever/HybridRetriever hiện CHƯA hỗ trợ đẩy filter

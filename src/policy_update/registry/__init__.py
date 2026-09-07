@@ -4,6 +4,7 @@ ngày hiệu lực), quản lý version — tái dùng ParserFactory/BaseParser 
 cho bước trích xuất nội dung.
 """
 
+from .access_metadata import build_access_metadata
 from .checksum import compute_checksum, compute_checksum_stream
 from .exceptions import PolicyNotFoundError, PolicyOverlapError, PolicyRegistryError
 from .models import (
@@ -18,6 +19,7 @@ from .policy_registry import PolicyRegistry
 from .storage import InMemoryPolicyStore, PolicyStore
 
 __all__ = [
+    "build_access_metadata",
     "compute_checksum",
     "compute_checksum_stream",
     "PolicyRegistryError",
