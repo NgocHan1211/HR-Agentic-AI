@@ -46,7 +46,7 @@ class PolicyRegistry:
         self._store = store or InMemoryPolicyStore()
         self._strict_overlap = strict_overlap
 
-    def upload(self, request: PolicyUploadRequest) -> PolicyUploadResult:
+    def upload(self, request: PolicyUploadRequest, *, allow_category_change: bool = False) -> PolicyUploadResult:
         checksum = compute_checksum(request.file_bytes)
 
         duplicate = self._find_duplicate(request.policy_key, checksum)
@@ -58,6 +58,23 @@ class PolicyRegistry:
             )
 
         existing_versions = self._store.list_by_key(request.policy_key)
+
+        if existing_versions:
+            latest = existing_versions[-1]
+            if latest.category != request.category and not allow_category_change:
+                raise PolicyRegistryError(
+                    f"policy_key={request.policy_key!r} đang thuộc category "
+                    f"{latest.category!r} (version {latest.version}), nhưng upload này "
+                    f"khai category={request.category!r}. Đổi category giữa các version "
+                    f"cùng policy_key có thể làm sai lệch overlap-check. Nếu đây là chủ "
+                    f"đích, gọi upload(..., allow_category_change=True).",
+                    details={
+                        "policy_key": request.policy_key,
+                        "previous_category": latest.category,
+                        "new_category": request.category,
+                    },
+                )
+
         next_version = max((p.version for p in existing_versions), default=0) + 1
 
         overlaps = find_overlaps(

@@ -55,7 +55,7 @@ class DenseRetriever:
     def add_chunks(self, chunks: List[Chunk]) -> None:
         points = []
         for chunk in chunks:
-            embedding = self.model.encode(chunk.text).tolist()
+            embedding = self.model.encode(chunk.get_embedding_text()).tolist()
             text_hash = hashlib.sha256(chunk.text.encode("utf-8")).hexdigest()[:16]
             raw_id = f"{chunk.source_ref.source_id}_{chunk.order}_{text_hash}"
             unique_id = str(uuid.uuid5(uuid.NAMESPACE_URL, raw_id))

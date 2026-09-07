@@ -15,7 +15,13 @@ này, Người 2 không phải sửa gì cả — chỉ cần rag_adapter.py c�
 
 search() cũng là nơi access_filter.py thực sự được áp dụng (xem
 SEARCH_OVERFETCH_MULTIPLIER — lý do over-fetch thay vì lọc thẳng sau
-top_k, đọc docstring access_filter.py để biết vì sao).
+top_k, đọc docstring access_filter.py để biết vì sao), và (tuỳ chọn) nơi
+Reranker (reranker.py) được áp dụng — LUÔN sau access_filter, không bao
+giờ trước: rerank bằng CrossEncoder tốn kém hơn hẳn 1 phép lọc dict thuần
+Python, nên lọc quyền trước để không phí công rerank những chunk chắc chắn
+sẽ bị loại vì sai company/scope/hết hạn/thiếu quyền — và quan trọng hơn,
+để không đưa nội dung người dùng không có quyền xem vào bất kỳ tính toán
+nào, dù chỉ là tính điểm liên quan.
 """
 
 from __future__ import annotations
@@ -48,6 +54,20 @@ class HybridRetrievable(Protocol):
     """
 
     def hybrid_retrieve(self, query: str, top_k: int) -> RetrievalResult: ...
+
+
+class Reranks(Protocol):
+    """
+    Interface tối thiểu cho bước rerank (tuỳ chọn) — cùng lý do dùng
+    Protocol thay vì import thẳng class Reranker cụ thể như
+    HybridRetrievable ở trên: reranker.py import sentence_transformers.
+    CrossEncoder ngay ở module scope, kéo cùng chuỗi phụ thuộc nặng như
+    Indexer. RAGAdapter không rerank theo mặc định (reranker=None) —
+    caller nào cần mới tự tạo Reranker() thật (hoặc fake cho test) rồi
+    truyền vào constructor.
+    """
+
+    def rerank(self, query: str, retrieval_result: RetrievalResult, top_k: int) -> RetrievalResult: ...
 
 
 @dataclass
@@ -103,14 +123,24 @@ def _to_retrieved_evidence(rc: RetrievedChunk) -> RetrievedEvidence:
 
 
 class RAGAdapter:
-    def __init__(self, indexer: HybridRetrievable) -> None:
+    def __init__(self, indexer: HybridRetrievable, *, reranker: Reranks | None = None) -> None:
+        """
+        reranker: None (mặc định) — không rerank, giữ nguyên thứ tự/điểm số
+        từ HybridRetriever (RRF) sau khi lọc quyền. Truyền 1 Reranker thật
+        (reranker.py) để bật rerank bằng CrossEncoder — RAGAdapter không tự
+        tạo Reranker() vì việc đó bắt buộc tải mô hình CrossEncoder ngay
+        lúc khởi tạo (chậm, tốn RAM/GPU), kể cả khi caller không cần rerank.
+        """
+
         self._indexer = indexer
+        self._reranker = reranker
 
     def search(self, query: str, *, context: AccessContext, top_k: int = TOP_K) -> SearchResponse:
         """
-        Hàm public DUY NHẤT Người 2 cần gọi. Áp dụng access_filter TRƯỚC
-        khi cắt còn đúng top_k (xem module docstring) — không phải lọc kết
-        quả cuối cùng đã cắt sẵn.
+        Hàm public DUY NHẤT Người 2 cần gọi. Thứ tự xử lý CỐ ĐỊNH và không
+        đổi được từ bên ngoài — over-fetch -> access_filter -> rerank (nếu
+        có) -> cắt còn đúng top_k (xem module docstring để biết vì sao thứ
+        tự này, đặc biệt vì sao rerank luôn đứng SAU access_filter).
         """
 
         if not query or not query.strip():
@@ -126,7 +156,16 @@ class RAGAdapter:
             context, raw_result.results, metadata_getter=lambda rc: rc.chunk.metadata
         )
 
-        top = allowed[:top_k]
+        if self._reranker is not None:
+            # Bọc lại thành RetrievalResult vì Reranker.rerank() nhận đúng
+            # kiểu này (không nhận list[RetrievedChunk] trần) — allowed đã
+            # là danh sách CHỈ GỒM chunk người hỏi có quyền thấy, nên
+            # CrossEncoder không bao giờ tính điểm trên nội dung bị cấm.
+            filtered_result = RetrievalResult(query=query, results=allowed)
+            top = self._reranker.rerank(query, filtered_result, top_k).results
+        else:
+            top = allowed[:top_k]
+
         evidence = [_to_retrieved_evidence(rc) for rc in top]
 
         return SearchResponse(query=query, evidence=evidence)
