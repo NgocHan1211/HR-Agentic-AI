@@ -78,12 +78,15 @@ def parse_attendance_excel(file_path: str | Path, mapping_spec: SheetMappingSpec
 
 
 def _parse_excel(file_path: str | Path, spec: SheetMappingSpec) -> dict[str, pd.DataFrame]:
-    workbook = pd.ExcelFile(file_path)
     result: dict[str, pd.DataFrame] = {}
-    for sheet, config in spec.sheets.items():
-        if sheet not in workbook.sheet_names: raise ValueError(f"required sheet not found: {sheet}")
-        header_row = int(config.get("header_row", 0))
-        result[sheet] = pd.read_excel(workbook, sheet_name=sheet, header=header_row).dropna(how="all")
+    # ExcelFile keeps a Windows file handle open until close() is called.  Use a
+    # context manager because Streamlit uploads are copied to temporary files
+    # which must be removable immediately after parsing.
+    with pd.ExcelFile(file_path) as workbook:
+        for sheet, config in spec.sheets.items():
+            if sheet not in workbook.sheet_names: raise ValueError(f"required sheet not found: {sheet}")
+            header_row = int(config.get("header_row", 0))
+            result[sheet] = pd.read_excel(workbook, sheet_name=sheet, header=header_row).dropna(how="all")
     return result
 
 
