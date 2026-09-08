@@ -191,6 +191,18 @@ def formula_required_codes(formula: dict[str, Any]) -> set[str]:
             if item.get("source") in {"employee", "attendance"} and item.get("field_code")}
 
 
+def formula_codes_for_source(formula: dict[str, Any], source: str) -> set[str]:
+    """Return only the spreadsheet fields consumed from one input source."""
+    return {str(item.get("field_code")) for item in formula.get("variables", [])
+            if item.get("source") == source and item.get("field_code")}
+
+
+def mapping_for_codes(mapping: dict[str, str], codes: set[str]) -> dict[str, str]:
+    """Keep the ID plus fields required by a particular payroll input."""
+    return {column: field for column, field in mapping.items()
+            if field == "employee_id" or field in codes}
+
+
 def show_formula_summary(formula: dict[str, Any]) -> None:
     source_names = {"employee": "Hồ sơ nhân viên", "attendance": "Chấm công", "rate_config": "Cấu hình mức lương",
                     "regulatory": "Quy định", "literal": "Giá trị cố định"}
@@ -246,6 +258,41 @@ def final_excel(results: list[Any]) -> bytes:
 if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "assistant", "content": "Chào HR! Bạn có thể nhập hướng dẫn tính lương ở dưới, hoặc upload PDF/DOCX/TXT quy chế. Sau đó upload **một workbook Excel duy nhất** và map các sheet nguồn."}]
 if "formula" not in st.session_state: st.session_state.formula = None
+if "payroll_results" not in st.session_state: st.session_state.payroll_results = []
+if "payroll_feedback" not in st.session_state: st.session_state.payroll_feedback = []
+if "payroll_failures" not in st.session_state: st.session_state.payroll_failures = []
+if "payroll_period" not in st.session_state: st.session_state.payroll_period = ""
+
+if st.session_state.payroll_results:
+    st.subheader("Báo sai / yêu cầu sửa")
+    st.caption("Phản hồi được lưu cùng kết quả của phiên làm việc này để HR theo dõi và xử lý trước khi chốt lương.")
+    employee_options = ["Toàn bộ bảng lương", *[item.employee_id for item in st.session_state.payroll_results]]
+    with st.form("payroll_feedback_form", clear_on_submit=True):
+        feedback_employee = st.selectbox("Nhân viên bị ảnh hưởng", employee_options)
+        feedback_type = st.selectbox("Phân loại lỗi", [
+            "Sai dữ liệu đầu vào", "Sai công thức tính", "Thiếu hoặc sai chính sách", "Kết quả cần kiểm tra", "Khác"
+        ])
+        feedback_detail = st.text_area("Mô tả lỗi", placeholder="Ví dụ: NV001 có 10 giờ OT, nhưng bảng đang dùng 12 giờ.")
+        expected_change = st.text_area("Kết quả hoặc dữ liệu mong muốn", placeholder="Ví dụ: điều chỉnh OT về 10 giờ và tính lại.")
+        submitted = st.form_submit_button("Gửi yêu cầu sửa")
+    if submitted:
+        if not feedback_detail.strip():
+            st.error("Hãy mô tả lỗi để người xử lý có đủ thông tin.")
+        else:
+            st.session_state.payroll_feedback.append({
+                "Kỳ lương": st.session_state.payroll_period,
+                "Nhân viên": feedback_employee,
+                "Phân loại": feedback_type,
+                "Mô tả": feedback_detail.strip(),
+                "Yêu cầu xử lý": expected_change.strip() or "Chưa nêu",
+                "Trạng thái": "Chờ xử lý",
+            })
+            st.success("Đã ghi nhận yêu cầu sửa.")
+    if st.session_state.payroll_feedback:
+        feedback_frame = pd.DataFrame(st.session_state.payroll_feedback)
+        st.dataframe(feedback_frame, hide_index=True, use_container_width=True)
+        st.download_button("Tải danh sách phản hồi", feedback_frame.to_csv(index=False).encode("utf-8-sig"),
+                           f"phan_hoi_payroll_{st.session_state.payroll_period}.csv", "text/csv")
 for message in st.session_state.messages:
     with st.chat_message(message["role"]): st.markdown(message["content"])
 
@@ -298,8 +345,12 @@ employee_id = st.selectbox("Cột mã nhân viên của sheet nhân viên", empl
                           index=employee_columns.index(suggest(employee_columns, ("mã nv", "ma nv", "employee_id"))) if suggest(employee_columns, ("mã nv", "ma nv", "employee_id")) in employee_columns else 0)
 employee_map = suggested_field_mappings(employee_columns, employee_id, "employee", formula_required_codes(st.session_state.formula or default_formula("UPLOAD")))
 
-source_sheets = st.multiselect("Các sheet cung cấp dữ liệu tính lương", [name for name in sheet_names if name != employee_sheet],
-                               help="Ví dụ: Ca đêm, Phép năm, Thai sản, OT. Các trường cùng nhân viên sẽ được gộp.")
+single_sheet = st.checkbox("Dùng sheet này cho cả dữ liệu nhân viên và payroll", value=True,
+                           help="Mỗi dòng là một nhân viên, có cả lương cơ bản, ngày công, OT... Bỏ chọn khi dữ liệu payroll nằm ở các sheet khác.")
+source_sheets: list[str] = []
+if not single_sheet:
+    source_sheets = st.multiselect("Các sheet cung cấp dữ liệu tính lương", [name for name in sheet_names if name != employee_sheet],
+                                   help="Ví dụ: Ca đêm, Phép năm, Thai sản, OT. Các trường cùng nhân viên sẽ được gộp.")
 attendance_raw: dict[str, pd.DataFrame] = {}
 attendance_specs: dict[str, dict[str, Any]] = {}
 for sheet in source_sheets:
@@ -314,6 +365,13 @@ for sheet in source_sheets:
         employee_column = st.selectbox(f"Cột mã nhân viên — {sheet}", columns, key=f"id_{sheet}")
         attendance_raw[sheet] = frame
         attendance_specs[sheet] = {"columns": suggested_field_mappings(columns, employee_column, f"field_{sheet}", formula_required_codes(st.session_state.formula or default_formula("UPLOAD")))}
+
+if single_sheet:
+    active_formula = st.session_state.formula or default_formula("UPLOAD")
+    source_sheets = [employee_sheet]
+    attendance_raw = {employee_sheet: employee_frame}
+    attendance_specs = {employee_sheet: {"columns": mapping_for_codes(
+        employee_map, formula_codes_for_source(active_formula, "attendance"))}}
 
 with st.expander("Cấu hình chạy payroll"):
     company_id = st.text_input("Company ID", "UPLOAD")
@@ -337,6 +395,9 @@ if st.button("Xác nhận công thức & tính lương", type="primary"):
             st.error("Dữ liệu không hợp lệ: " + validation_message(validation)); st.stop()
         if not validation.passed: st.error("Dữ liệu không hợp lệ: " + " | ".join(validation.errors)); st.stop()
         by_id = {item.employee_id: item for item in records}; results, failures = [], []
+        st.session_state.payroll_results = results
+        st.session_state.payroll_failures = failures
+        st.session_state.payroll_period = period
         active_formula = {**formula, "company_id": company_id, "status": "active"}
         company_data = {**company.to_dict(), "minimum_wage": minimum_wage, "max_ot_hours": max_ot}
         for employee in employees:
