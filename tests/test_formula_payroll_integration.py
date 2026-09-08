@@ -16,6 +16,18 @@ from payroll.formula import (
     review_formula,
 )
 from payroll.ingestion import AttendanceRecord, CompanyConfig, EmployeeMaster
+from payroll.formula.formula_extractor import _normalize_expression_syntax
+
+
+def test_formula_extractor_normalizes_common_conditional_syntax() -> None:
+    assert _normalize_expression_syntax(
+        "if employee.position == 'production' then base_salary_production else base_salary_packaging"
+    ) == "(base_salary_production) if (position == 'production') else (base_salary_packaging)"
+    assert _normalize_expression_syntax(
+        "if actual_worked_days_in_month == days_in_month then 0.004 * base_salary else "
+        "(0.004 * base_salary / days_in_month) * actual_worked_days_in_month"
+    ) == "(0.004 * base_salary) if (actual_worked_days_in_month == days_in_month) else " \
+           "((0.004 * base_salary / days_in_month) * actual_worked_days_in_month)"
 
 
 def test_reviewed_formula_spec_runs_in_payroll_engine() -> None:

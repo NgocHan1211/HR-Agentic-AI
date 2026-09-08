@@ -47,7 +47,8 @@ DEFAULT_SAMPLE_VARIABLES = {
     "ot_night_holiday_300_hours": 0,
 }
 DEFAULT_FIELD_CODES = (
-    "BASIC, SALARY_OT_DAY_NORMAL_150, SALARY_OT_NIGHT_HOLIDAY_300, "
+    "BASIC, base_salary, monthly_salary, internal_allowance_amount, insurance_fee, "
+    "SALARY_OT_DAY_NORMAL_150, SALARY_OT_NIGHT_HOLIDAY_300, "
     "SALARY_ADVANCE, SI_EE, PIT_AMOUNT"
 )
 

@@ -85,3 +85,23 @@ def test_formula_extraction_normalizes_vietnamese_field_codes_to_shared_schema()
 
     candidate = extract_formula("demo", "C", llm_client=VietnameseFieldCodeLLM())
     assert [item.field_code for item in candidate.proposed_spec.variables] == ["basic_salary", "total_working_days"]
+
+
+def test_formula_extraction_repairs_policy_sources_and_non_dsl_metadata() -> None:
+    """Small models often emit policy_document and prose conditions despite the prompt."""
+    class LooseContractLLM:
+        def complete(self, *, system: str, user: str) -> str:
+            return json.dumps({"confidence": 0.8, "calculation_basis": "monthly", "variables": [
+                {"name": "allowance", "source": "policy_document", "value": 300_000},
+                {"name": "insurance_rate", "source": "rate_config", "value": 0.004},
+            ], "rules": [{"output_field": "ALLOWANCE", "expression": "allowance + basic_salary / 26 * unpaid_leave_days",
+                            "condition": "applies to all workers", "rounding": "round_to_nearest_currency",
+                            "section": "line_items"}]})
+
+    candidate = extract_formula("demo", "C", llm_client=LooseContractLLM())
+    variables = candidate.proposed_spec.variables
+    rule = candidate.proposed_spec.rules[0]
+    assert [item.source for item in variables] == ["literal", "literal", "employee", "attendance"]
+    assert [item.field_code for item in variables[-2:]] == ["basic_salary", "unpaid_leave_days"]
+    assert rule.condition is None
+    assert rule.rounding == "round"

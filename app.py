@@ -1,7 +1,10 @@
 """Chat-oriented Streamlit UI for document-driven, multi-sheet payroll."""
 from __future__ import annotations
 
+from dataclasses import asdict
+from datetime import date
 from io import BytesIO
+import json
 import mimetypes
 import re
 import sys
@@ -17,7 +20,9 @@ from openpyxl import Workbook
 
 from payroll.anomaly_router import can_publish
 from payroll.engine import run_payroll
-from payroll.formula.formula_extractor import FormulaExtractionError, extract_formula, formula_to_engine_dict
+from payroll.formula import (FormulaCandidateStore, FormulaExtractionError, ReviewStatus, ValidationContext,
+                             activate_formula_version, extract_formula, formula_to_engine_dict,
+                             render_for_review, review_formula, validate_formula)
 from payroll.ingestion import SheetMappingSpec, normalize_attendance, normalize_salary_schema, validate_ingested_data
 from policy_update.parsers.base_parser import DocumentRole, ParseRequest, Persistence, SourceRef
 from policy_update.parsers.excel_parser import ExcelParser
@@ -26,7 +31,7 @@ from policy_update.parsers.parser_factory import ParserFactory
 NONE = "— Không dùng —"
 st.set_page_config(page_title="Trợ lý Payroll AI", layout="wide")
 st.title("Trợ lý Payroll AI")
-st.caption("Chat hoặc upload quy chế → map một workbook Excel nhiều sheet → tính lương → review anomaly → tải file final.")
+st.caption("Quy chế → FormulaSpec nháp → validate → HR review/Activate → map workbook → tính lương → review anomaly.")
 
 
 def default_formula(company_id: str) -> dict[str, Any]:
@@ -73,20 +78,47 @@ def workbook_sheet(data: bytes, sheet_name: str, header_row: int) -> pd.DataFram
     return pd.read_excel(BytesIO(data), sheet_name=sheet_name, header=header_row - 1).dropna(how="all")
 
 
-def formula_from_text(text: str, evidence: dict[str, Any]) -> dict[str, Any]:
-    candidate = extract_formula(text, "UPLOAD", [evidence])
-    formula = formula_to_engine_dict(candidate.proposed_spec)
-    formula["status"] = "active"
-    return formula
+DEFAULT_FIELD_CODES = ("BASIC, SALARY_OT_DAY_NORMAL_150, SALARY_OT_NIGHT_HOLIDAY_300, "
+                       "SALARY_ADVANCE, SI_EE, PIT_AMOUNT")
 
 
-def document_text(uploaded: Any) -> tuple[str, list[str]]:
+def formula_candidate_from_text(text: str, evidence: list[dict[str, Any]]) -> Any:
+    return extract_formula(text, "UPLOAD", evidence)
+
+
+def formula_context_from_text(field_codes_text: str) -> ValidationContext:
+    field_codes = frozenset(item.strip() for item in field_codes_text.split(",") if item.strip())
+    if not field_codes:
+        raise ValueError("Cần nhập ít nhất một mã khoản tính được phép.")
+    return ValidationContext(
+        allowed_variable_sources=frozenset({"employee", "attendance", "rate_config", "regulatory", "literal"}),
+        field_codes=field_codes,
+    )
+
+
+def review_values(candidate: Any, raw_json: str) -> dict[str, float | bool]:
+    try:
+        values = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Dữ liệu mẫu phải là JSON hợp lệ.") from exc
+    if not isinstance(values, dict):
+        raise ValueError("Dữ liệu mẫu phải là một JSON object.")
+    literals = {item.name: item.value for item in candidate.proposed_spec.variables
+                if item.source == "literal" and item.value is not None}
+    return {**literals, **values}
+
+
+def document_text(uploaded: Any) -> tuple[str, list[str], list[dict[str, Any]]]:
     data, suffix = file_bytes(uploaded), Path(uploaded.name).suffix.lower()
     mime = mimetypes.guess_type(uploaded.name)[0] or "application/octet-stream"
     request = ParseRequest(SourceRef(f"policy-{uploaded.name}", uploaded.name, Persistence.TEMPORARY), BytesIO(data),
-                           uploaded.name, suffix, mime, len(data), DocumentRole.POLICY)
+                           uploaded.name, suffix, mime, len(data), DocumentRole.POLICY, enable_ocr=True,
+                           language_hint="vie+eng")
     parsed = ParserFactory.create(request).parse(request)
-    return "\n".join(block.normalized_text for block in parsed.blocks), [warning.message for warning in parsed.warnings]
+    evidence = [{"block_id": block.block_id, "page": block.location.page,
+                 "section_path": block.location.section_path, "text": block.normalized_text[:500]}
+                for block in parsed.blocks if block.normalized_text]
+    return "\n".join(block.normalized_text for block in parsed.blocks), [warning.message for warning in parsed.warnings], evidence
 
 
 @st.cache_data(show_spinner=False)
@@ -258,6 +290,9 @@ def final_excel(results: list[Any]) -> bytes:
 if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "assistant", "content": "Chào HR! Bạn có thể nhập hướng dẫn tính lương ở dưới, hoặc upload PDF/DOCX/TXT quy chế. Sau đó upload **một workbook Excel duy nhất** và map các sheet nguồn."}]
 if "formula" not in st.session_state: st.session_state.formula = None
+if "formula_store" not in st.session_state: st.session_state.formula_store = FormulaCandidateStore()
+if "formula_candidate" not in st.session_state: st.session_state.formula_candidate = None
+if "formula_context" not in st.session_state: st.session_state.formula_context = None
 if "payroll_results" not in st.session_state: st.session_state.payroll_results = []
 if "payroll_feedback" not in st.session_state: st.session_state.payroll_feedback = []
 if "payroll_failures" not in st.session_state: st.session_state.payroll_failures = []
@@ -300,8 +335,12 @@ guide = st.chat_input("Nhập hướng dẫn tính lương…")
 if guide:
     st.session_state.messages.append({"role": "user", "content": guide})
     try:
-        st.session_state.formula = formula_from_text(guide, {"source": "hr_chat", "text": guide})
-        reply = "Đã trích xuất công thức nháp. Hãy kiểm tra và xác nhận công thức sau khi map dữ liệu."
+        candidate = formula_candidate_from_text(guide, [{"source": "hr_chat", "text": guide}])
+        st.session_state.formula_store = FormulaCandidateStore()
+        st.session_state.formula_store.save(candidate)
+        st.session_state.formula_candidate = candidate
+        st.session_state.formula_context = formula_context_from_text(DEFAULT_FIELD_CODES)
+        reply = "Đã tạo FormulaSpec nháp. Hãy validate, tạo review example, Accept và Activate trước khi tính lương."
     except FormulaExtractionError as exc:
         reply = f"Không trích xuất được công thức: {exc}"
     st.session_state.messages.append({"role": "assistant", "content": reply})
@@ -311,14 +350,86 @@ st.subheader("1. Nguồn công thức")
 policy_file = st.file_uploader("Upload quy chế/hướng dẫn tính lương (PDF, DOCX hoặc TXT)", type=["pdf", "docx", "txt"])
 if policy_file and st.button("Trích xuất công thức từ tài liệu"):
     try:
-        text, warnings = document_text(policy_file)
+        text, warnings, evidence = document_text(policy_file)
         if not text: raise ValueError("Tài liệu không có văn bản trích xuất được; PDF scan cần OCR.")
-        st.session_state.formula = formula_from_text(text, {"source": policy_file.name, "warnings": warnings})
-        st.success("Đã trích xuất FormulaSpec từ tài liệu. Hãy kiểm tra JSON trước khi chạy.")
+        candidate = formula_candidate_from_text(text, evidence)
+        st.session_state.formula_store = FormulaCandidateStore()
+        st.session_state.formula_store.save(candidate)
+        st.session_state.formula_candidate = candidate
+        st.session_state.formula_context = formula_context_from_text(DEFAULT_FIELD_CODES)
+        st.success("Đã tạo FormulaSpec nháp. Hãy review và Activate trước khi chạy payroll.")
     except (FormulaExtractionError, ValueError) as exc:
         st.error(f"Không trích xuất được công thức: {exc}")
     except Exception as exc:
         st.error(f"Không thể đọc tài liệu: {exc}")
+
+candidate = st.session_state.formula_candidate
+context = st.session_state.formula_context
+if candidate is not None and context is not None:
+    st.divider()
+    st.subheader("FormulaSpec review")
+    field_codes_text = st.text_area(
+        "Mã khoản tính được phép (cách nhau bằng dấu phẩy)", value=DEFAULT_FIELD_CODES,
+        help="FormulaSpec chỉ được Activate khi mọi output_field nằm trong danh mục này.", key="allowed_field_codes",
+    )
+    sample_json = st.text_area(
+        "Dữ liệu mẫu để review (JSON)", value="{}",
+        help="Nhập giá trị cho các biến không phải literal, ví dụ: {\"basic_salary\": 5000000, \"worked_days\": 26}.",
+        key="formula_review_values",
+    )
+    if st.button("Validate lại FormulaSpec"):
+        try:
+            st.session_state.formula_context = formula_context_from_text(field_codes_text)
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+    context = st.session_state.formula_context
+    validation = validate_formula(candidate, context)
+    if validation.passed:
+        st.success("FormulaSpec đã qua validation.")
+    else:
+        st.error("FormulaSpec chưa hợp lệ.")
+        st.write(list(validation.errors))
+    left, right = st.columns(2)
+    with left:
+        st.caption("FormulaSpec nháp")
+        st.code(json.dumps(asdict(candidate.proposed_spec), ensure_ascii=False, indent=2, default=str), language="json")
+    with right:
+        st.caption("Evidence")
+        st.json(candidate.source_evidence[:10])
+    if validation.passed and st.button("Tạo review example"):
+        try:
+            package = render_for_review(candidate, review_values(candidate, sample_json), context)
+            st.session_state.formula_store.save_review_package(package)
+            st.success("Đã tạo review example.")
+        except ValueError as exc:
+            st.error(f"Không thể tạo review example: {exc}")
+    package = st.session_state.formula_store.review_packages.get(candidate.candidate_id)
+    if package is not None:
+        st.subheader("Review examples")
+        st.json(list(package.rule_explanations))
+        reviewer = st.text_input("Người review", value="payroll-admin")
+        accept_col, activate_col = st.columns(2)
+        with accept_col:
+            if candidate.review_status is ReviewStatus.DRAFT and st.button("Accept FormulaSpec"):
+                try:
+                    review_formula(st.session_state.formula_store, candidate.candidate_id, ReviewStatus.ACCEPTED,
+                                   reviewer=reviewer, validation_context=context, note="Accepted in payroll app")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(f"Không thể Accept: {exc}")
+        with activate_col:
+            effective_date = st.date_input("Ngày hiệu lực", value=date.today())
+            if candidate.review_status is ReviewStatus.ACCEPTED and st.button("Activate FormulaSpec"):
+                try:
+                    active_spec = activate_formula_version(st.session_state.formula_store, candidate.candidate_id,
+                                                           context, effective_date=effective_date)
+                    active_formula = formula_to_engine_dict(active_spec)
+                    active_formula["status"] = "active"
+                    st.session_state.formula = active_formula
+                    st.success(f"Đã Activate FormulaSpec version {active_spec.version}.")
+                except ValueError as exc:
+                    st.error(f"Không thể Activate: {exc}")
 
 st.subheader("2. Một workbook Excel nhiều sheet")
 workbook_file = st.file_uploader("Upload workbook nguồn", type=["xlsx", "xlsm"])
@@ -343,7 +454,8 @@ employee_columns = [str(value) for value in employee_frame.columns]
 st.dataframe(employee_frame.head(8), hide_index=True, use_container_width=True)
 employee_id = st.selectbox("Cột mã nhân viên của sheet nhân viên", employee_columns,
                           index=employee_columns.index(suggest(employee_columns, ("mã nv", "ma nv", "employee_id"))) if suggest(employee_columns, ("mã nv", "ma nv", "employee_id")) in employee_columns else 0)
-employee_map = suggested_field_mappings(employee_columns, employee_id, "employee", formula_required_codes(st.session_state.formula or default_formula("UPLOAD")))
+formula_for_mapping = st.session_state.formula or (formula_to_engine_dict(candidate.proposed_spec) if candidate else default_formula("UPLOAD"))
+employee_map = suggested_field_mappings(employee_columns, employee_id, "employee", formula_required_codes(formula_for_mapping))
 
 single_sheet = st.checkbox("Dùng sheet này cho cả dữ liệu nhân viên và payroll", value=True,
                            help="Mỗi dòng là một nhân viên, có cả lương cơ bản, ngày công, OT... Bỏ chọn khi dữ liệu payroll nằm ở các sheet khác.")
@@ -364,10 +476,10 @@ for sheet in source_sheets:
         st.dataframe(frame.head(6), hide_index=True, use_container_width=True)
         employee_column = st.selectbox(f"Cột mã nhân viên — {sheet}", columns, key=f"id_{sheet}")
         attendance_raw[sheet] = frame
-        attendance_specs[sheet] = {"columns": suggested_field_mappings(columns, employee_column, f"field_{sheet}", formula_required_codes(st.session_state.formula or default_formula("UPLOAD")))}
+        attendance_specs[sheet] = {"columns": suggested_field_mappings(columns, employee_column, f"field_{sheet}", formula_codes_for_source(formula_for_mapping, "attendance"))}
 
 if single_sheet:
-    active_formula = st.session_state.formula or default_formula("UPLOAD")
+    active_formula = formula_for_mapping
     source_sheets = [employee_sheet]
     attendance_raw = {employee_sheet: employee_frame}
     attendance_specs = {employee_sheet: {"columns": mapping_for_codes(
@@ -379,12 +491,17 @@ with st.expander("Cấu hình chạy payroll"):
     minimum_wage = st.number_input("Ngưỡng lương tối thiểu", min_value=0, value=3_500_000, step=100_000)
     max_ot = st.number_input("Ngưỡng OT cảnh báo", min_value=0.0, value=200.0, step=1.0)
 
-formula = st.session_state.formula or default_formula(company_id)
-with st.expander("FormulaSpec sẽ chạy", expanded=st.session_state.formula is not None):
-    show_formula_summary(formula)
+formula = st.session_state.formula
+if formula is not None:
+    with st.expander("FormulaSpec sẽ chạy", expanded=True):
+        show_formula_summary(formula)
+else:
+    st.warning("Cần Activate một FormulaSpec đã được review trước khi tính lương.")
 st.caption("Tên trường chuẩn trong mapping phải khớp `field_code` của FormulaSpec. Ví dụ: map ‘Giờ ca đêm’ thành `night_shift_hours` nếu công thức dùng field này.")
 
 if st.button("Xác nhận công thức & tính lương", type="primary"):
+    if formula is None:
+        st.error("FormulaSpec chưa được Activate."); st.stop()
     if not source_sheets:
         st.error("Chọn ít nhất một sheet nguồn (chấm công/ca đêm/phép/thai sản/OT)."); st.stop()
     try:

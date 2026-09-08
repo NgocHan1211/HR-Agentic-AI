@@ -7,6 +7,7 @@ import random
 import re
 import time
 import unicodedata
+import ast
 import urllib.error
 import urllib.request
 from typing import Any, Protocol
@@ -81,6 +82,8 @@ def extract_formula(document_text: str, company_id: str, evidence_locations: lis
 
 
 _NON_IDENTIFIER_RE = re.compile(r"[^0-9a-zA-Z_]+")
+_ALLOWED_VARIABLE_SOURCES = frozenset({"employee", "attendance", "rate_config", "regulatory", "literal"})
+_POLICY_SOURCES = frozenset({"policy_document", "policy", "document", "regulation", "regulations"})
 
 # Canonical integration codes are English so that FormulaSpec, Excel mappings
 # and the engine use one stable contract.  Vietnamese aliases are accepted from
@@ -104,6 +107,19 @@ _OT_RATE_RE = re.compile(r"(150|200|300)")
 _OT_NIGHT_RE = re.compile(r"NIGHT|CA_?DEM", re.IGNORECASE)
 _OT_HOLIDAY_RE = re.compile(r"HOLIDAY|NGAY_?LE|_LE(_|$)", re.IGNORECASE)
 _OT_REST_RE = re.compile(r"DAY_?OFF|NGAY_?NGHI|REST", re.IGNORECASE)
+_IF_THEN_ELSE_RE = re.compile(r"^if\s+(.+?)\s+then\s+(.+?)\s+else\s+(.+)$", re.IGNORECASE)
+
+
+def _normalize_expression_syntax(expression: str | None) -> str | None:
+    """Convert common LLM pseudo-syntax into the supported Python expression DSL."""
+    if not expression:
+        return expression
+    normalized = expression.strip().replace("employee.", "")
+    match = _IF_THEN_ELSE_RE.match(normalized)
+    if match:
+        condition, when_true, when_false = match.groups()
+        normalized = f"({when_true}) if ({condition}) else ({when_false})"
+    return normalized
 
 
 def _infer_ot_attributes(*texts: str | None) -> OTAttributes | None:
@@ -134,6 +150,56 @@ def _canonical_field_code(raw_code: Any, source: str | None) -> Any:
         return raw_code
     normalized = _slugify_identifier(str(raw_code), set())
     return _FIELD_CODE_ALIASES.get(normalized, normalized)
+
+
+def _normalize_variable_source(item: dict[str, Any]) -> None:
+    """Repair common LLM source aliases into an executable input contract.
+
+    A number embedded in the policy is a literal.  It cannot be a `rate_config`
+    value without a rate key, and `policy_document` is evidence rather than a
+    runtime input source.  Keep genuinely external policy values as regulatory
+    inputs so the reviewer can provide them later.
+    """
+    source = str(item.get("source") or "").strip().lower()
+    if source in _POLICY_SOURCES:
+        item["source"] = "literal" if item.get("value") is not None else "regulatory"
+    elif source == "rate_config" and not item.get("field_code"):
+        item["source"] = "literal" if item.get("value") is not None else "rate_config"
+    elif source not in _ALLOWED_VARIABLE_SOURCES:
+        # Preserve a stated number, but never create an unsupported runtime source.
+        item["source"] = "literal" if item.get("value") is not None else "regulatory"
+    if item["source"] == "rate_config" and not item.get("field_code"):
+        item["field_code"] = item.get("name")
+    if item["source"] == "regulatory" and not item.get("field_code"):
+        item["field_code"] = item.get("name")
+
+
+def _normalize_rounding(raw: Any) -> str | None:
+    value = str(raw or "").strip().lower()
+    if not value or value in {"none", "no", "null"}: return None
+    if value in {"round", "round_to_nearest", "round_to_nearest_currency", "nearest_currency"}: return "round"
+    return value
+
+
+def _expression_or_none(raw: Any) -> str | None:
+    """Discard prose conditions, which cannot be evaluated by the payroll DSL."""
+    value = str(raw or "").strip()
+    if not value: return None
+    try:
+        ast.parse(value, mode="eval")
+    except SyntaxError:
+        return None
+    return value
+
+
+def _expression_names(expression: str | None) -> set[str]:
+    if not expression:
+        return set()
+    try:
+        tree = ast.parse(expression, mode="eval")
+    except SyntaxError:
+        return set()
+    return {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
 
 
 def _parse_category(raw: Any) -> ComponentCategory | None:
@@ -203,18 +269,33 @@ def _sanitize_identifiers(payload: dict[str, Any]) -> dict[str, Any]:
     for item in payload.get("variables", []):
         item = dict(item)
         item["name"] = resolve(item.get("name", ""))
+        _normalize_variable_source(item)
         item["field_code"] = _canonical_field_code(item.get("field_code"), item.get("source"))
         variables.append(item)
 
     rules = []
     for item in payload.get("rules", []):
         item = dict(item)
-        item["expression"] = apply_rename(item.get("expression"))
-        item["condition"] = apply_rename(item.get("condition"))
+        item["expression"] = _normalize_expression_syntax(apply_rename(item.get("expression")))
+        item["condition"] = _expression_or_none(apply_rename(item.get("condition")))
+        item["rounding"] = _normalize_rounding(item.get("rounding"))
         # Rename this rule's own output_field AFTER using it to rename expression/condition above,
         # so later rules that reference it (by its original name) still get rewritten correctly.
         item["output_field"] = resolve(item.get("output_field", ""))
         rules.append(item)
+
+    # If the policy writes an expression such as ``basic_salary / 26`` but the
+    # LLM only listed job-specific policy rates, retain the expression as a
+    # per-employee workbook input.  This is safer than arbitrarily choosing one
+    # job-specific rate for every worker; the review screen still exposes it.
+    defined = {item["name"] for item in variables}
+    outputs = {item["output_field"] for item in rules}
+    builtins = {"prorate", "round_down", "tax_bracket_vn"}
+    referenced = set().union(*(_expression_names(item.get("expression")) for item in rules)) if rules else set()
+    for name in sorted(referenced - defined - outputs - builtins):
+        source = "employee" if "salary" in name or "wage" in name else "attendance"
+        variables.append({"name": name, "source": source, "field_code": name,
+                          "description": "Input inferred from a formula expression; HR must verify the mapping."})
 
     return {**payload, "variables": variables, "rules": rules}
 
