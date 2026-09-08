@@ -157,7 +157,18 @@ def validate_ingested_data(employees: list[EmployeeMaster], attendance: list[Att
 
 def _require_type(spec: SheetMappingSpec, expected: str) -> None:
     if spec.file_type != expected: raise ValueError(f"expected {expected} mapping")
-def _text(value: Any) -> str: return "" if value is None or pd.isna(value) else str(value).strip()
+def _text(value: Any) -> str:
+    """Return a stable key for values read from Excel.
+
+    Excel frequently turns an ID such as ``21083`` into the float ``21083.0``.
+    Treat that representation as the same ID, while preserving string IDs
+    (including leading zeroes) unchanged.
+    """
+    if value is None or pd.isna(value):
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
 def _scalar(value: Any) -> Any: return _number_or_text(value)
 def _number_or_text(value: Any) -> Any:
     if isinstance(value, (int, float)) and not isinstance(value, bool): return float(value)

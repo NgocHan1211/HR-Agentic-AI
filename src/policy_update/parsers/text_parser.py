@@ -1,4 +1,4 @@
-# text_parser.py
+"""Plain-text parser with deterministic Vietnamese heading detection."""
 from __future__ import annotations
 
 import re
