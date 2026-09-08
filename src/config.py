@@ -4,7 +4,6 @@ OCR_LOW_CONFIDENCE_THRESHOLD = 60.0
 OCR_RENDER_DPI = 300
 LINE_Y_TOLERANCE = 3.0  # Tolerance (points) when grouping "chars" on the same line along the y-axis
 
-# Chunking configuration
 # Structure-based chunking
 CHUNK_MAX_SIZE = 1000  # Maximum characters per chunk
 CHUNK_MIN_SIZE = 100   # Minimum characters per chunk
@@ -21,3 +20,10 @@ EMBEDDING_MODEL = "BAAI/bge-m3"
 VECTOR_SIZE = 1024
 RERANKER_MODEL = "AITeamVN/Vietnamese_Reranker"
 TOP_K = 5
+
+# Excel parser configuration
+EXCEL_MAX_SCAN_ROWS = 20000
+EXCEL_MAX_DATA_ROWS_PER_SHEET = 5000
+EXCEL_HEADER_SEARCH_ROWS = 20
+EXCEL_HEADER_MIN_SCORE = 0.35
+EXCEL_TABLE_BLANK_GAP_ROWS = 30
