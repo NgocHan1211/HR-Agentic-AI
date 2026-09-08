@@ -1,8 +1,12 @@
 """Chat-oriented Streamlit UI for document-driven, multi-sheet payroll."""
 from __future__ import annotations
 
+from dataclasses import asdict
+from datetime import date
 from io import BytesIO
+import json
 import mimetypes
+import os
 import re
 import sys
 import unicodedata
@@ -17,8 +21,20 @@ from openpyxl import Workbook
 
 from payroll.anomaly_router import can_publish
 from payroll.engine import run_payroll
-from payroll.formula.formula_extractor import FormulaExtractionError, extract_formula, formula_to_engine_dict
+from payroll.formula import (
+    FormulaCandidateStore,
+    FormulaExtractionError,
+    ReviewStatus,
+    ValidationContext,
+    activate_formula_version,
+    extract_formula,
+    formula_to_engine_dict,
+    render_for_review,
+    review_formula,
+    validate_formula,
+)
 from payroll.ingestion import SheetMappingSpec, normalize_attendance, normalize_salary_schema, validate_ingested_data
+from payroll.mock_workbook_demo import calculate_mock_workbook, compare_mock_expected, mock_result_frame
 from policy_update.parsers.base_parser import DocumentRole, ParseRequest, Persistence, SourceRef
 from policy_update.parsers.excel_parser import ExcelParser
 from policy_update.parsers.parser_factory import ParserFactory
@@ -26,7 +42,7 @@ from policy_update.parsers.parser_factory import ParserFactory
 NONE = "— Không dùng —"
 st.set_page_config(page_title="Trợ lý Payroll AI", layout="wide")
 st.title("Trợ lý Payroll AI")
-st.caption("Chat hoặc upload quy chế → map một workbook Excel nhiều sheet → tính lương → review anomaly → tải file final.")
+st.caption("Chọn luồng AI review policy, demo Payroll Excel hoặc workbook Excel tuỳ chỉnh.")
 
 
 def default_formula(company_id: str) -> dict[str, Any]:
@@ -255,8 +271,219 @@ def final_excel(results: list[Any]) -> bytes:
     output = BytesIO(); book.save(output); return output.getvalue()
 
 
+def policy_with_evidence(uploaded: Any) -> tuple[str, list[str], list[dict[str, Any]]]:
+    """Parse one policy and retain small, reviewable evidence references."""
+    data, suffix = file_bytes(uploaded), Path(uploaded.name).suffix.lower()
+    mime = mimetypes.guess_type(uploaded.name)[0] or "application/octet-stream"
+    request = ParseRequest(
+        SourceRef(f"policy-{uploaded.name}", uploaded.name, Persistence.TEMPORARY),
+        BytesIO(data), uploaded.name, suffix, mime, len(data), DocumentRole.POLICY,
+        enable_ocr=True, language_hint="vie+eng",
+    )
+    parsed = ParserFactory.create(request).parse(request)
+    text_value = "\n\n".join(block.normalized_text for block in parsed.blocks if block.normalized_text)
+    evidence = [
+        {
+            "block_id": block.block_id,
+            "page": block.location.page,
+            "section_path": block.location.section_path,
+            "text": block.normalized_text[:500],
+        }
+        for block in parsed.blocks if block.normalized_text
+    ]
+    return text_value, [warning.message for warning in parsed.warnings], evidence
+
+
+def _review_context(field_codes_text: str) -> ValidationContext:
+    field_codes = frozenset(item.strip() for item in field_codes_text.split(",") if item.strip())
+    if not field_codes:
+        raise ValueError("Cần nhập ít nhất một output field code.")
+    return ValidationContext(
+        allowed_variable_sources=frozenset({"employee", "attendance", "rate_config", "regulatory", "literal"}),
+        field_codes=field_codes,
+    )
+
+
+def _review_sample_values(candidate: Any, raw_json: str) -> dict[str, float | bool]:
+    try:
+        values = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Sample variables phải là JSON hợp lệ.") from exc
+    if not isinstance(values, dict):
+        raise ValueError("Sample variables phải là JSON object.")
+    literals = {
+        variable.name: variable.value
+        for variable in candidate.proposed_spec.variables
+        if variable.source == "literal" and variable.value is not None
+    }
+    return {**literals, **values}
+
+
+def render_formula_review_mode() -> None:
+    """Phase 1 policy-to-FormulaSpec flow, kept in the primary app entry point."""
+    st.header("AI Formula Review")
+    st.caption("Policy → parser → LLM FormulaSpec → validation → human review → activate version")
+    st.info("AI chỉ tạo đề xuất. Công thức chỉ được dùng sau khi validation và người phụ trách Accept/Activate.")
+
+    if "llm_formula_store" not in st.session_state:
+        st.session_state.llm_formula_store = FormulaCandidateStore()
+    if "llm_formula_candidate" not in st.session_state:
+        st.session_state.llm_formula_candidate = None
+    if "llm_formula_context" not in st.session_state:
+        st.session_state.llm_formula_context = None
+
+    company_id = st.text_input("Company ID", value="mock-company", key="review_company")
+    field_codes = st.text_area(
+        "Allowed output field codes (phân cách bằng dấu phẩy)",
+        value="BASIC, SALARY_OT_DAY_NORMAL_150, SALARY_OT_NIGHT_HOLIDAY_300, SALARY_ADVANCE, SI_EE, PIT_AMOUNT",
+        key="review_codes",
+    )
+    sample_json = st.text_area(
+        "Sample variables để tạo review example (JSON)",
+        value=json.dumps({"base_salary": 15_000_000, "salary_advance": 0, "worked_days": 22, "standard_days": 22,
+                          "ot_day_150_hours": 0, "ot_night_holiday_300_hours": 0}, ensure_ascii=False, indent=2),
+        key="review_sample",
+    )
+    policy = st.file_uploader("Upload policy PDF / DOCX / TXT", type=["pdf", "docx", "txt"], key="review_policy")
+    if os.getenv("OPENROUTER_API_KEY"):
+        st.caption(f"LLM sẵn sàng · OpenRouter · model: {os.getenv('OPENROUTER_MODEL', 'openrouter/free')}")
+    elif os.getenv("GEMMA_API_KEY"):
+        st.caption(f"LLM sẵn sàng · Gemma API · model: {os.getenv('GEMMA_MODEL', 'gemma-4-31b-it')}")
+    else:
+        st.warning("Chưa cấu hình OPENROUTER_API_KEY hoặc GEMMA_API_KEY. Bạn vẫn có thể parse policy nhưng chưa gọi AI được.")
+
+    if policy is not None:
+        try:
+            document, warnings, evidence = policy_with_evidence(policy)
+            st.success(f"Parse thành công: {len(evidence)} block có thể truy vết.")
+            if warnings:
+                st.warning(" | ".join(warnings))
+            with st.expander("Preview policy đã parse"):
+                st.text(document[:8_000] or "Không trích xuất được nội dung text.")
+            if st.button("Trích xuất FormulaSpec bằng AI", type="primary", key="extract_review"):
+                if not os.getenv("OPENROUTER_API_KEY") and not os.getenv("GEMMA_API_KEY"):
+                    raise ValueError("Chưa cấu hình AI key trong terminal đang chạy Streamlit.")
+                context = _review_context(field_codes)
+                with st.spinner("Đang yêu cầu LLM tạo FormulaSpec…"):
+                    candidate = extract_formula(document, company_id.strip(), evidence)
+                if not candidate.proposed_spec.rules:
+                    raise ValueError("LLM không trích xuất được rule tính lương nào.")
+                st.session_state.llm_formula_store = FormulaCandidateStore()
+                st.session_state.llm_formula_store.save(candidate)
+                st.session_state.llm_formula_candidate = candidate
+                st.session_state.llm_formula_context = context
+                st.success(f"Đã nhận FormulaCandidate gồm {len(candidate.proposed_spec.rules)} rule. Kiểm tra phần review bên dưới.")
+        except Exception as exc:
+            st.error(f"Không thể parse/extract policy: {exc}")
+
+    candidate = st.session_state.llm_formula_candidate
+    context = st.session_state.llm_formula_context
+    if candidate is None or context is None:
+        return
+    st.divider()
+    st.subheader("Formula review")
+    if st.button("Validate lại với field code hiện tại", key="revalidate_review"):
+        st.session_state.llm_formula_context = _review_context(field_codes)
+        context = st.session_state.llm_formula_context
+    validation = validate_formula(candidate, context)
+    if validation.passed:
+        st.success("FormulaSpec đã qua validation.")
+    else:
+        st.error("FormulaSpec chưa hợp lệ. Không thể Accept/Activate.")
+        st.write(list(validation.errors))
+    left, right = st.columns(2)
+    with left:
+        st.caption("FormulaSpec đề xuất")
+        st.code(json.dumps(asdict(candidate.proposed_spec), ensure_ascii=False, indent=2, default=str), language="json")
+    with right:
+        st.caption("Evidence")
+        st.json(candidate.source_evidence[:10])
+    store = st.session_state.llm_formula_store
+    if validation.passed and st.button("Tạo review example", key="make_review_example"):
+        try:
+            store.save_review_package(render_for_review(candidate, _review_sample_values(candidate, sample_json), context))
+            st.success("Đã tạo review example.")
+        except Exception as exc:
+            st.error(f"Không thể tạo review example: {exc}")
+    package = store.review_packages.get(candidate.candidate_id)
+    if package is not None:
+        with st.expander("Review examples", expanded=True):
+            st.json(list(package.rule_explanations))
+        reviewer = st.text_input("Reviewer", value="payroll-admin", key="reviewer_name")
+        first, second = st.columns(2)
+        with first:
+            if candidate.review_status is ReviewStatus.DRAFT and st.button("Accept FormulaSpec", key="accept_review"):
+                try:
+                    review_formula(store, candidate.candidate_id, ReviewStatus.ACCEPTED, reviewer, context, note="Accepted in app.py")
+                    st.success("FormulaSpec đã được Accept.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Accept thất bại: {exc}")
+        with second:
+            effective_date = st.date_input("Effective date", value=date.today(), key="activate_date")
+            if candidate.review_status is ReviewStatus.ACCEPTED and st.button("Activate Formula Version", key="activate_review"):
+                try:
+                    active = activate_formula_version(store, candidate.candidate_id, context, effective_date=effective_date)
+                    st.session_state.formula = formula_to_engine_dict(active)
+                    st.success(f"Đã activate FormulaSpec version {active.version}. Chuyển sang tab Workbook tuỳ chỉnh để map dữ liệu và tính lương.")
+                except Exception as exc:
+                    st.error(f"Activate thất bại: {exc}")
+
+
+def render_mock_payroll_mode() -> None:
+    """One-click Phase 1 workbook demo with unambiguous file labels."""
+    st.header("Payroll Excel mock & đối soát")
+    st.info(
+        "File nguồn cần upload: **mock_payroll_workbook.xlsx** (gồm NhanVien, ChamCong, TangCa). "
+        "File đối soát: **bang_luong_2025-05.xlsx** là tuỳ chọn. **Master Plan.xlsx không dùng ở luồng này**; "
+        "nó là workbook cấu hình để dùng cho Phase 2."
+    )
+    mock_file = st.file_uploader("1. File nguồn payroll — mock_payroll_workbook.xlsx", type=["xlsx"], key="mock_workbook")
+    expected_file = st.file_uploader("2. File kết quả để đối soát — bang_luong_2025-05.xlsx (không bắt buộc)", type=["xlsx"], key="mock_expected")
+    if st.button("Xác nhận công thức & tính lương", type="primary", key="run_mock", disabled=mock_file is None):
+        try:
+            formula, results, validation = calculate_mock_workbook(mock_file)
+            output = mock_result_frame(results)
+            st.success("Đã đọc workbook, validate dữ liệu, review/activate FormulaSpec fixture và tính lương.")
+            st.caption(f"Formula: {formula.formula_id} · version: {formula.version} · status: {formula.status.value}")
+            if validation.warnings:
+                st.warning("; ".join(validation.warnings))
+            st.dataframe(output, hide_index=True, use_container_width=True)
+            st.download_button("Tải kết quả CSV", output.to_csv(index=False).encode("utf-8-sig"), "bang_luong_mock_result.csv", "text/csv")
+            if expected_file is not None:
+                comparison = compare_mock_expected(output, expected_file)
+                st.subheader("Đối soát với file kết quả mẫu")
+                st.dataframe(comparison, hide_index=True, use_container_width=True)
+                if comparison["Gross khớp"].all() and comparison["Net khớp"].all():
+                    st.success("Gross và Net khớp toàn bộ với file kết quả mẫu.")
+                else:
+                    st.error("Có chênh lệch với file kết quả mẫu. Kiểm tra các cột đối soát.")
+        except Exception as exc:
+            st.error(f"Không thể chạy payroll mock: {exc}")
+            st.exception(exc)
+
+
+st.divider()
+app_mode = st.radio(
+    "Chọn luồng sử dụng",
+    ["AI Formula Review", "Payroll Excel mock & đối soát", "Workbook Excel tuỳ chỉnh"],
+    horizontal=True,
+)
+
+if app_mode == "AI Formula Review":
+    render_formula_review_mode()
+    st.stop()
+if app_mode == "Payroll Excel mock & đối soát":
+    render_mock_payroll_mode()
+    st.stop()
+
+st.info(
+    "Dùng luồng này khi workbook của công ty có cấu trúc riêng và cần tự map sheet/cột. "
+    "Nếu chỉ cần chạy demo Phase 1, chọn **Payroll Excel mock & đối soát** ở trên."
+)
+
 if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "Chào HR! Bạn có thể nhập hướng dẫn tính lương ở dưới, hoặc upload PDF/DOCX/TXT quy chế. Sau đó upload **một workbook Excel duy nhất** và map các sheet nguồn."}]
+    st.session_state.messages = [{"role": "assistant", "content": "Chào HR! Đây là luồng workbook tuỳ chỉnh: upload quy chế hoặc nhập hướng dẫn, sau đó upload một workbook và map các sheet nguồn."}]
 if "formula" not in st.session_state: st.session_state.formula = None
 if "payroll_results" not in st.session_state: st.session_state.payroll_results = []
 if "payroll_feedback" not in st.session_state: st.session_state.payroll_feedback = []
@@ -320,7 +547,7 @@ if policy_file and st.button("Trích xuất công thức từ tài liệu"):
     except Exception as exc:
         st.error(f"Không thể đọc tài liệu: {exc}")
 
-st.subheader("2. Một workbook Excel nhiều sheet")
+st.subheader("2. Workbook Excel tuỳ chỉnh nhiều sheet")
 workbook_file = st.file_uploader("Upload workbook nguồn", type=["xlsx", "xlsm"])
 if not workbook_file:
     st.info("Workbook có thể gồm sheet nhân viên, ca đêm, phép năm, thai sản, OT…; hãy upload để map từng sheet.")
