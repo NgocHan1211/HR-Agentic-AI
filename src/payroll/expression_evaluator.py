@@ -33,7 +33,7 @@ _COMPARE = {ast.Eq: operator.eq, ast.NotEq: operator.ne, ast.Lt: operator.lt,
 
 def evaluate(expression: str, variables: Mapping[str, Any], *,
              functions: Mapping[str, Callable[..., float]] | None = None) -> float | bool:
-    """Evaluate only numeric/boolean variables and whitelisted function calls."""
+    """Evaluate numeric/boolean expressions and string comparisons safely."""
     if not isinstance(expression, str) or not expression.strip():
         raise ExpressionEvaluationError("expression must be a non-empty string")
     try:
@@ -52,17 +52,18 @@ class _Evaluator(ast.NodeVisitor):
     def generic_visit(self, node: ast.AST) -> Any:
         raise ExpressionEvaluationError(f"unsupported syntax: {type(node).__name__}")
 
-    def visit_Constant(self, node: ast.Constant) -> float | bool:
+    def visit_Constant(self, node: ast.Constant) -> float | bool | str:
         if isinstance(node.value, bool): return node.value
         if isinstance(node.value, Real): return float(node.value)
-        raise ExpressionEvaluationError("only numeric and boolean literals are allowed")
+        if isinstance(node.value, str): return node.value
+        raise ExpressionEvaluationError("only numeric, boolean, and string literals are allowed")
 
-    def visit_Name(self, node: ast.Name) -> float | bool:
+    def visit_Name(self, node: ast.Name) -> float | bool | str:
         if node.id not in self.variables:
             raise ExpressionEvaluationError(f"missing variable: {node.id}")
         value = self.variables[node.id]
-        if isinstance(value, bool) or isinstance(value, Real): return value
-        raise ExpressionEvaluationError(f"variable {node.id!r} must be numeric or boolean")
+        if isinstance(value, (bool, Real, str)): return value
+        raise ExpressionEvaluationError(f"variable {node.id!r} must be numeric, boolean, or string")
 
     def visit_UnaryOp(self, node: ast.UnaryOp) -> float | bool:
         value = self.visit(node.operand)

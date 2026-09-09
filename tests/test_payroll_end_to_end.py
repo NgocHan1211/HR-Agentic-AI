@@ -105,3 +105,15 @@ def test_formula_extraction_repairs_policy_sources_and_non_dsl_metadata() -> Non
     assert [item.field_code for item in variables[-2:]] == ["basic_salary", "unpaid_leave_days"]
     assert rule.condition is None
     assert rule.rounding == "round"
+
+
+def test_formula_extraction_normalizes_bare_round_down() -> None:
+    class BareRoundDownLLM:
+        def complete(self, *, system: str, user: str) -> str:
+            return json.dumps({"confidence": 0.8, "calculation_basis": "monthly", "variables": [
+                {"name": "basic", "source": "employee", "field_code": "basic_salary"}],
+                "rules": [{"output_field": "accident_insurance_fee", "expression": "basic",
+                            "rounding": "round_down"}]})
+
+    candidate = extract_formula("demo", "C", llm_client=BareRoundDownLLM())
+    assert candidate.proposed_spec.rules[0].rounding == "round_down_1000"

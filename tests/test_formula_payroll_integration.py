@@ -12,11 +12,12 @@ from payroll.formula import (
     ReviewStatus,
     ValidationContext,
     activate_formula_version,
-    render_for_review,
     review_formula,
 )
 from payroll.ingestion import AttendanceRecord, CompanyConfig, EmployeeMaster
 from payroll.formula.formula_extractor import _normalize_expression_syntax
+from payroll.expression_evaluator import evaluate
+from payroll.formula.formula_extractor import _sanitize_identifiers
 
 
 def test_formula_extractor_normalizes_common_conditional_syntax() -> None:
@@ -28,6 +29,38 @@ def test_formula_extractor_normalizes_common_conditional_syntax() -> None:
         "(0.004 * base_salary / days_in_month) * actual_worked_days_in_month"
     ) == "(0.004 * base_salary) if (actual_worked_days_in_month == days_in_month) else " \
            "((0.004 * base_salary / days_in_month) * actual_worked_days_in_month)"
+
+
+def test_expression_supports_string_conditions() -> None:
+    expression = "1000000 if service_type == 'outsourcing' else 500000"
+    assert evaluate(expression, {"service_type": "outsourcing"}) == 1000000
+    assert evaluate(expression, {"service_type": "internal"}) == 500000
+
+
+def test_formula_extractor_normalizes_boolean_literals_and_omits_net_rule() -> None:
+    payload = _sanitize_identifiers({
+        "variables": [{"name": "is_insured", "source": "employee", "field_code": "is_insured"}],
+        "rules": [
+            {"output_field": "insurance_fee", "expression": "100 if is_insured == true else 0"},
+            {"output_field": "net_pay", "expression": "gross - deductions", "section": "net"},
+        ],
+    })
+    assert payload["rules"] == [{"output_field": "insurance_fee", "expression": "100 if is_insured == True else 0",
+                                  "condition": None, "rounding": None}]
+
+
+def test_formula_extractor_makes_repeated_output_fields_unique() -> None:
+    payload = _sanitize_identifiers({
+        "variables": [],
+        "rules": [
+            {"output_field": "service_fee", "expression": "100"},
+            {"output_field": "service_fee", "expression": "200"},
+            {"output_field": "service_fee", "expression": "300"},
+        ],
+    })
+    assert [rule["output_field"] for rule in payload["rules"]] == [
+        "service_fee", "service_fee_2", "service_fee_3"
+    ]
 
 
 def test_reviewed_formula_spec_runs_in_payroll_engine() -> None:
@@ -53,13 +86,6 @@ def test_reviewed_formula_spec_runs_in_payroll_engine() -> None:
     )
     store = FormulaCandidateStore()
     store.save(candidate)
-    store.save_review_package(
-        render_for_review(
-            candidate,
-            {"base_salary": 15_000_000, "worked_days": 20, "standard_days": 22},
-            context,
-        )
-    )
     review_formula(store, "candidate-v1", ReviewStatus.ACCEPTED, "reviewer", context)
     active_spec = activate_formula_version(store, "candidate-v1", context, effective_date=date(2026, 8, 1))
 

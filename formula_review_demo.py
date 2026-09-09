@@ -48,6 +48,7 @@ DEFAULT_SAMPLE_VARIABLES = {
 }
 DEFAULT_FIELD_CODES = (
     "BASIC, base_salary, monthly_salary, internal_allowance_amount, insurance_fee, "
+    "luong_co_ban, phu_cap_noi_quy_2, "
     "SALARY_OT_DAY_NORMAL_150, SALARY_OT_NIGHT_HOLIDAY_300, "
     "SALARY_ADVANCE, SI_EE, PIT_AMOUNT"
 )

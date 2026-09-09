@@ -34,7 +34,9 @@ def extract_formula(document_text: str, company_id: str, evidence_locations: lis
               "role?,ot_attributes?}], and rules [{output_field,expression,condition?,rounding?,section?,"
               "description?,category?,ot_attributes?}]. "
               "Sources must be employee, attendance, rate_config, regulatory, or literal. "
-              "Use only arithmetic and prorate, round_down, tax_bracket_vn; never calculate a salary. "
+              "Use only arithmetic and prorate, round_down, tax_bracket_vn; for rule rounding use exactly "
+              "'round' or 'round_down_<positive_unit>' such as 'round_down_1000', never bare 'round_down'; "
+              "never calculate a salary. "
               "Every `name` and `output_field` MUST be a valid Python identifier: lowercase ASCII "
               "letters, digits, underscores only, must not start with a digit, no spaces or accents "
               "(e.g. use 'luong_co_ban', not 'Lương cơ bản' or 'luong-co-ban'). "
@@ -115,6 +117,8 @@ def _normalize_expression_syntax(expression: str | None) -> str | None:
     if not expression:
         return expression
     normalized = expression.strip().replace("employee.", "")
+    normalized = re.sub(r"\btrue\b", "True", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bfalse\b", "False", normalized, flags=re.IGNORECASE)
     match = _IF_THEN_ELSE_RE.match(normalized)
     if match:
         condition, when_true, when_false = match.groups()
@@ -178,6 +182,7 @@ def _normalize_rounding(raw: Any) -> str | None:
     value = str(raw or "").strip().lower()
     if not value or value in {"none", "no", "null"}: return None
     if value in {"round", "round_to_nearest", "round_to_nearest_currency", "nearest_currency"}: return "round"
+    if value in {"round_down", "floor", "floor_currency"}: return "round_down_1000"
     return value
 
 
@@ -274,6 +279,7 @@ def _sanitize_identifiers(payload: dict[str, Any]) -> dict[str, Any]:
         variables.append(item)
 
     rules = []
+    seen_output_fields: set[str] = set()
     for item in payload.get("rules", []):
         item = dict(item)
         item["expression"] = _normalize_expression_syntax(apply_rename(item.get("expression")))
@@ -281,7 +287,15 @@ def _sanitize_identifiers(payload: dict[str, Any]) -> dict[str, Any]:
         item["rounding"] = _normalize_rounding(item.get("rounding"))
         # Rename this rule's own output_field AFTER using it to rename expression/condition above,
         # so later rules that reference it (by its original name) still get rewritten correctly.
-        item["output_field"] = resolve(item.get("output_field", ""))
+        raw_output_field = str(item.get("output_field", ""))
+        item["output_field"] = resolve(raw_output_field)
+        if item["output_field"] in seen_output_fields:
+            item["output_field"] = _slugify_identifier(raw_output_field, used_names)
+        seen_output_fields.add(item["output_field"])
+        if str(item.get("section", "")).strip().lower() == "net":
+            # PayrollEngine derives NET from line_items - deductions; a separate
+            # net rule would be double-counted as an income item.
+            continue
         rules.append(item)
 
     # If the policy writes an expression such as ``basic_salary / 26`` but the

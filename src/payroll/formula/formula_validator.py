@@ -107,15 +107,17 @@ def _validate_expression(expression: str, rule_code: str, allowed_functions: Ite
         if isinstance(node, ast.Call):
             if not isinstance(node.func, ast.Name) or node.func.id not in allowed or node.keywords:
                 errors.append(f"rule {rule_code}: only approved positional function calls are allowed")
-        elif isinstance(node, ast.Name) and node.id not in allowed:
+        elif isinstance(node, ast.Name) and node.id not in allowed and node.id not in {"True", "False"}:
             names.add(node.id)
-        elif isinstance(node, ast.Constant) and not isinstance(node.value, (int, float, bool)):
-            errors.append(f"rule {rule_code}: only numeric/boolean constants are allowed")
+        elif isinstance(node, ast.Constant) and not isinstance(node.value, (int, float, bool, str)):
+            errors.append(f"rule {rule_code}: only numeric/boolean/string constants are allowed")
     return names
 
 
 def _validate_rounding(rounding: str, rule_code: str, errors: list[str]) -> None:
     if rounding == "round": return
+    if rounding == "round_down":
+        return
     prefix = "round_down_"
     if not rounding.startswith(prefix): errors.append(f"rule {rule_code}: invalid rounding {rounding!r}"); return
     try:
