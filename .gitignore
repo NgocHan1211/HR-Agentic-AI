@@ -1,3 +1,6 @@
 .env
-__pycache__
-qdrant_storage
+__pycache__/
+*.py[cod]
+qdrant_storage/
+.vscode/
+.venv/

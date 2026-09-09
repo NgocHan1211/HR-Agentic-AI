@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, ClassVar
 
 import pdfplumber
@@ -27,7 +29,9 @@ from config import (
     OCR_LOW_CONFIDENCE_THRESHOLD,
     OCR_RENDER_DPI,
 )
+import pytesseract
 
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'  # Update this path to your Tesseract installation
 _RE_HEADING_PHAN = re.compile(r"^\s*Phần\s+[IVXLC0-9]+\b", re.IGNORECASE)
 _RE_HEADING_CHUONG = re.compile(r"^\s*Chương\s+[IVXLC0-9]+\b", re.IGNORECASE)
 _RE_HEADING_MUC = re.compile(r"^\s*Mục\s+[IVXLC0-9]+\b", re.IGNORECASE)
@@ -521,6 +525,7 @@ class PDFParser(BaseParser):
                 cause=exc,
             ) from exc
 
+        self._configure_tesseract_command(pytesseract)
         lang = self._tesseract_lang(request.language_hint)
 
         try:
@@ -533,9 +538,14 @@ class PDFParser(BaseParser):
                 cause=exc,
             ) from exc
 
-        if lang not in installed_languages:
+        required_languages = set(lang.split("+"))
+        missing_languages = required_languages - installed_languages
+        if missing_languages:
             raise OCRFailed(
-                message=f"Tesseract language data '{lang}' is not installed",
+                message=(
+                    "Tesseract language data is not installed: "
+                    f"{', '.join(sorted(missing_languages))}"
+                ),
                 source_id=request.source_ref.source_id,
             )
 
@@ -730,14 +740,34 @@ class PDFParser(BaseParser):
         return items, warning
 
     @staticmethod
+    def _configure_tesseract_command(pytesseract: Any) -> None:
+        """Use an explicit configuration or the standard Windows installation path.
+
+        This keeps OCR working when Streamlit is launched from a terminal whose
+        PATH was not refreshed after installing Tesseract.
+        """
+        configured = os.getenv("TESSERACT_CMD")
+        candidates = [
+            Path(configured) if configured else None,
+            Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
+        ]
+        for candidate in candidates:
+            if candidate is not None and candidate.is_file():
+                pytesseract.pytesseract.tesseract_cmd = str(candidate)
+                return
+
+    @staticmethod
     def _tesseract_lang(language_hint: str | None) -> str:
-        if language_hint and language_hint.lower().startswith("vi"):
+        hint = (language_hint or "").lower().strip()
+        if hint in {"vi+en", "en+vi", "vie+eng", "eng+vie", "mixed"}:
+            return "vie+eng"
+        if hint.startswith("vi") or hint.startswith("vie"):
             return "vie"
 
-        if language_hint and language_hint.lower().startswith("en"):
+        if hint.startswith("en") or hint.startswith("eng"):
             return "eng"
 
-        return "vie"
+        return "vie+eng"
 
     def _finalize_items(
         self,
