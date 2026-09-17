@@ -13,6 +13,7 @@ import urllib.request
 from typing import Any, Protocol
 from uuid import uuid4
 
+from ..field_catalog import canonical_field_code
 from .formula_schema import (ComponentCategory, ComponentRole, DayType, FormulaCandidate, FormulaRule,
                              FormulaSpec, FormulaVariable, OTAttributes, ShiftType)
 
@@ -53,12 +54,16 @@ def extract_formula(document_text: str, company_id: str, evidence_locations: lis
               "rules whose category is BASIC, ALLOWANCE, BONUS, or SALARY_OT MUST use section='line_items'. "
               "NET pay is always tong thu nhap (line_items) minus tong khau tru (deductions); never fold "
               "a deduction into a line_items rule or vice versa. "
-              "For overtime, never invent a separate field per rate (e.g. `ot_hours_150`, "
-              "`ot_holiday_night_350`). Instead set category='SALARY_OT' and give "
-              "`ot_attributes: {shift_type: 'Day'|'Night', day_type: 'Normal'|'Rest'|'Holiday', "
-              "rate: 1.5|2.0|2.7|3.0|3.9}` so every overtime variant is described the same way. "
-              "Use a SALARY_OT category only for one concrete OT variant with ot_attributes; "
-              "do not label aggregate totals such as total_overtime as SALARY_OT.")
+              "For overtime in a monthly attendance workbook, emit one attendance variable per concrete "
+              "OT variant (for example field_code `salary_ot_day_normal_150` with variable name "
+              "`ot_day_normal_150`, and `salary_ot_night_rest_270` for night/rest). Set "
+              "category='SALARY_OT' and `ot_attributes: {shift_type: 'Day'|'Night', "
+              "day_type: 'Normal'|'Rest'|'Holiday', rate: 1.5|2.0|2.5|2.7|3.0|3.5|3.9}` on that variable "
+              "and its matching rule. Never emit scalar attendance variables named/field-coded "
+              "`shift_type` or `day_type`: those are attributes of a concrete OT rule, not worksheet "
+              "columns. `overtime_hours` is an optional derived aggregate and must not be categorized "
+              "as SALARY_OT. Use a SALARY_OT category only for one concrete OT variant with "
+              "ot_attributes; do not label aggregate totals such as total_overtime as SALARY_OT.")
     try:
         raw_response = client.complete(system=system, user=document_text)
     except (OSError, RuntimeError) as exc:
@@ -87,25 +92,12 @@ _NON_IDENTIFIER_RE = re.compile(r"[^0-9a-zA-Z_]+")
 _ALLOWED_VARIABLE_SOURCES = frozenset({"employee", "attendance", "rate_config", "regulatory", "literal"})
 _POLICY_SOURCES = frozenset({"policy_document", "policy", "document", "regulation", "regulations"})
 
-# Canonical integration codes are English so that FormulaSpec, Excel mappings
-# and the engine use one stable contract.  Vietnamese aliases are accepted from
-# the LLM and converted at the boundary.
-_FIELD_CODE_ALIASES = {
-    "luong_co_ban": "basic_salary", "luong_cb": "basic_salary", "basic": "basic_salary",
-    "ngay_cong": "total_working_days", "so_ngay_cong": "total_working_days",
-    "ngay_cong_chuan": "standard_working_days", "cong_chuan": "standard_working_days",
-    "tang_ca": "salary_ot_day_normal_150", "gio_tang_ca": "salary_ot_day_normal_150", "ot": "salary_ot_day_normal_150",
-    "gio_ca_dem": "night_shift_hours", "ca_dem": "night_shift_hours",
-    "ngay_phep": "annual_leave_days", "phep_nam": "annual_leave_days",
-    "nghi_thai_san": "maternity_leave_days", "thai_san": "maternity_leave_days",
-}
-
 # Best-effort recognition of legacy per-rate OT field codes (OT_HOURS_150,
 # OT_DAY_SHIFT_150_HOURS, OT_HOLIDAY_NIGHT_SHIFT_350_HOURS, ...) so a document that still
 # talks about them collapses into the SALARY_OT(shift_type, day_type, rate) family instead
 # of creating a new one-off field_code per variant.
 _OT_KEYWORD_RE = re.compile(r"(^OT_)|(_OT$)|OVERTIME|TANG_?CA", re.IGNORECASE)
-_OT_RATE_RE = re.compile(r"(150|200|300)")
+_OT_RATE_RE = re.compile(r"(150|200|250|270|300|350|390)")
 _OT_NIGHT_RE = re.compile(r"NIGHT|CA_?DEM", re.IGNORECASE)
 _OT_HOLIDAY_RE = re.compile(r"HOLIDAY|NGAY_?LE|_LE(_|$)", re.IGNORECASE)
 _OT_REST_RE = re.compile(r"DAY_?OFF|NGAY_?NGHI|REST", re.IGNORECASE)
@@ -152,8 +144,7 @@ def _canonical_field_code(raw_code: Any, source: str | None) -> Any:
     """Translate known Vietnamese field aliases to the shared English contract."""
     if source not in {"employee", "attendance"} or raw_code is None:
         return raw_code
-    normalized = _slugify_identifier(str(raw_code), set())
-    return _FIELD_CODE_ALIASES.get(normalized, normalized)
+    return canonical_field_code(raw_code)
 
 
 def _normalize_variable_source(item: dict[str, Any]) -> None:

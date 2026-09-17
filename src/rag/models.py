@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 
-from ..policy_update.chunking.chunk_metadata import Chunk
+from policy_update.chunking.chunk_metadata import Chunk
 
 @dataclass
 class RetrievedChunk:

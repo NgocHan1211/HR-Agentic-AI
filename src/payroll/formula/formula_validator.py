@@ -39,6 +39,11 @@ def validate_formula(candidate: FormulaCandidate, context: ValidationContext) ->
     for variable in variables.values():
         if variable.source not in context.allowed_variable_sources:
             errors.append(f"variable {variable.name}: source is not in the approved data contract: {variable.source}")
+        if variable.source == "attendance" and str(variable.field_code or "").lower() in {"shift_type", "day_type"}:
+            errors.append(
+                f"variable {variable.name}: {variable.field_code} is OT rule metadata, not a monthly attendance column; "
+                "use a concrete salary_ot_<shift>_<day_type>_<rate> input instead"
+            )
     outputs = [rule.output_field for rule in spec.rules]
     if len(outputs) != len(set(outputs)): errors.append("duplicate output_field across rules")
     for output in outputs:
