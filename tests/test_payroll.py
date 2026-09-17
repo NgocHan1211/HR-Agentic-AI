@@ -74,3 +74,18 @@ def test_anomaly_rules_cover_default_and_configured_cases() -> None:
     assert {flag.code for flag in flags} == {"NET_RECONCILIATION_MISMATCH", "NET_SALARY_DEVIATION", "BELOW_MINIMUM_WAGE", "OT_HOURS_EXCEEDED"}
     result.anomaly_flags = flags
     assert not can_publish(result)
+
+
+def test_anomaly_rules_prorate_minimum_wage_and_count_salary_ot_fields() -> None:
+    result = PayrollResult(
+        employee_id="E2", company_id="C1", period="2025-05", formula_id="F1", calculation_basis="monthly",
+        line_items=[LineItem("BASIC", 2_000_000)], gross_salary=2_000_000, deductions=[], net_salary=2_000_000,
+        input_snapshot={"attendance": {
+            "scheduled_working_days": 26, "days_with_salary": 13,
+            "salary_ot_day_normal_150": 110, "salary_ot_night_rest_250": 91,
+        }},
+    )
+    flags = check_anomaly_rules(result, company_thresholds=AnomalyThresholds(minimum_wage=3_500_000, max_ot_hours=200))
+    codes = {flag.code for flag in flags}
+    assert "BELOW_MINIMUM_WAGE" not in codes
+    assert "OT_HOURS_EXCEEDED" in codes

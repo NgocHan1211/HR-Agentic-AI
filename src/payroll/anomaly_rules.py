@@ -34,8 +34,14 @@ def check_anomaly_rules(payroll_result: PayrollResult, history: Iterable[Any] = 
         change = abs(payroll_result.net_salary - baseline) / abs(baseline) * 100
         if change > thresholds.salary_change_percent:
             flags.append(_flag("NET_SALARY_DEVIATION", "warning", "Net salary deviates from baseline", change, thresholds.salary_change_percent, {"baseline": baseline}))
-    if thresholds.minimum_wage is not None and payroll_result.gross_salary < thresholds.minimum_wage:
-        flags.append(_flag("BELOW_MINIMUM_WAGE", "critical", "Gross salary is below configured minimum wage", payroll_result.gross_salary, thresholds.minimum_wage))
+    if thresholds.minimum_wage is not None:
+        required_minimum = _prorated_minimum_wage(payroll_result.input_snapshot, thresholds.minimum_wage)
+        if payroll_result.gross_salary < required_minimum:
+            flags.append(_flag(
+                "BELOW_MINIMUM_WAGE", "critical", "Gross salary is below the configured minimum wage for paid days",
+                payroll_result.gross_salary, required_minimum,
+                {"full_month_minimum": thresholds.minimum_wage},
+            ))
     ot_hours = _total_ot_hours(payroll_result.input_snapshot)
     if thresholds.max_ot_hours is not None and ot_hours > thresholds.max_ot_hours:
         flags.append(_flag("OT_HOURS_EXCEEDED", "warning", "Overtime hours exceed configured limit", ot_hours, thresholds.max_ot_hours))
@@ -62,7 +68,41 @@ def _baseline(result: PayrollResult, history: Iterable[Any]) -> float | None:
 
 def _total_ot_hours(snapshot: Mapping[str, Any]) -> float:
     attendance = snapshot.get("attendance", {})
-    return sum(float(value or 0) for key, value in attendance.items() if key.startswith("ot_") and key.endswith("_hours"))
+    derived_total = _numeric(attendance.get("overtime_hours"))
+    if derived_total is not None:
+        return derived_total
+    return sum(
+        _numeric(value) or 0
+        for key, value in attendance.items()
+        if key.startswith("salary_ot_") or (key.startswith("ot_") and key.endswith("_hours"))
+    )
+
+
+def _prorated_minimum_wage(snapshot: Mapping[str, Any], full_month_minimum: float) -> float:
+    """Scale the configured minimum for a partial payroll period when data permits."""
+    attendance = snapshot.get("attendance", {})
+    scheduled = _first_numeric(attendance, "scheduled_working_days", "standard_working_days")
+    paid_days = _first_numeric(attendance, "days_with_salary", "actual_paid_day", "days_worked_in_month", "total_working_days")
+    if scheduled is None or paid_days is None or scheduled <= 0:
+        return full_month_minimum
+    return full_month_minimum * min(max(paid_days / scheduled, 0), 1)
+
+
+def _first_numeric(values: Mapping[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        number = _numeric(values.get(key))
+        if number is not None:
+            return number
+    return None
+
+
+def _numeric(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _flag(code: str, severity: str, message: str, actual: float, threshold: float, metadata: dict[str, Any] | None = None) -> AnomalyFlag:

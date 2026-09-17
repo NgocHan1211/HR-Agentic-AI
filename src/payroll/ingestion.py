@@ -10,8 +10,29 @@ from typing import Any, Mapping
 import pandas as pd
 
 
+# These are calculated from mapped attendance counters, never selected from a
+# spreadsheet column.  Keep the list public so the mapping UI can omit them
+# from its required-column contract.
+DERIVED_ATTENDANCE_FIELD_CODES = frozenset({"is_full_month", "overtime_hours"})
+
+
 @dataclass(frozen=True)
 class SheetMappingSpec:
+    """Company/template-specific payroll mapping.
+
+    A sheet config can retain the legacy ``header_row`` (zero-based pandas
+    index), or use a business-facing layout configuration:
+
+    ``header_rows``
+        One-based Excel row numbers whose non-empty cells are joined into a
+        single column name. Example: ``[10, 11]``.
+    ``data_start_row``
+        One-based first Excel row containing records. Example: ``14``.
+    ``row_selector``
+        Declarative filter applied after headers are built, e.g.
+        ``{"column": "Lọc", "equals": "CÔNG"}``. This is deliberately a
+        per-template ingestion rule, never an Excel-parser rule.
+    """
     company_id: str
     file_type: str
     sheets: Mapping[str, Mapping[str, Any]]
@@ -77,6 +98,19 @@ def parse_attendance_excel(file_path: str | Path, mapping_spec: SheetMappingSpec
     return _parse_excel(file_path, mapping_spec)
 
 
+def read_payroll_sheet(workbook_source: str | Path | Any, sheet_name: str, config: Mapping[str, Any]) -> pd.DataFrame:
+    """Read one sheet using the optional payroll layout configuration.
+
+    This is intentionally separate from ``policy_update.parsers.excel_parser``:
+    it converts a known company payroll template into records, while the shared
+    parser remains a neutral document-structure extractor.
+    """
+    with pd.ExcelFile(workbook_source) as workbook:
+        if sheet_name not in workbook.sheet_names:
+            raise ValueError(f"required sheet not found: {sheet_name}")
+        return _read_configured_sheet(workbook, sheet_name, config)
+
+
 def _parse_excel(file_path: str | Path, spec: SheetMappingSpec) -> dict[str, pd.DataFrame]:
     result: dict[str, pd.DataFrame] = {}
     # ExcelFile keeps a Windows file handle open until close() is called.  Use a
@@ -85,9 +119,89 @@ def _parse_excel(file_path: str | Path, spec: SheetMappingSpec) -> dict[str, pd.
     with pd.ExcelFile(file_path) as workbook:
         for sheet, config in spec.sheets.items():
             if sheet not in workbook.sheet_names: raise ValueError(f"required sheet not found: {sheet}")
-            header_row = int(config.get("header_row", 0))
-            result[sheet] = pd.read_excel(workbook, sheet_name=sheet, header=header_row).dropna(how="all")
+            result[sheet] = _read_configured_sheet(workbook, sheet, config)
     return result
+
+
+def _read_configured_sheet(workbook: pd.ExcelFile, sheet: str, config: Mapping[str, Any]) -> pd.DataFrame:
+    header_rows = config.get("header_rows")
+    if header_rows is not None:
+        if not isinstance(header_rows, (list, tuple)) or not header_rows:
+            raise ValueError(f"sheet {sheet!r}: header_rows must be a non-empty list of one-based Excel row numbers")
+        rows = sorted({int(row) for row in header_rows})
+        if any(row < 1 for row in rows):
+            raise ValueError(f"sheet {sheet!r}: header_rows must use one-based Excel row numbers")
+        raw = pd.read_excel(workbook, sheet_name=sheet, header=None)
+        if rows[-1] > len(raw.index):
+            raise ValueError(f"sheet {sheet!r}: header_rows exceeds worksheet length")
+        headers = _combine_headers(raw, rows)
+        data_start_row = int(config.get("data_start_row", rows[-1] + 1))
+        if data_start_row <= rows[-1]:
+            raise ValueError(f"sheet {sheet!r}: data_start_row must be after every header row")
+        frame = raw.iloc[data_start_row - 1:].copy()
+        frame.columns = headers
+    else:
+        header_row = int(config.get("header_row", 0))
+        frame = pd.read_excel(workbook, sheet_name=sheet, header=header_row)
+        data_start_row = config.get("data_start_row")
+        if data_start_row is not None:
+            first_data_row = header_row + 2  # header_row is the zero-based pandas convention.
+            skip = max(int(data_start_row) - first_data_row, 0)
+            frame = frame.iloc[skip:].copy()
+    return _apply_row_selector(frame.dropna(how="all"), config.get("row_selector"), sheet)
+
+
+def _combine_headers(raw: pd.DataFrame, header_rows: list[int]) -> list[str]:
+    headers: list[str] = []
+    for column in range(raw.shape[1]):
+        parts = [_header_text(raw.iat[row - 1, column]) for row in header_rows]
+        label = " | ".join(dict.fromkeys(part for part in parts if part)) or f"Column_{column + 1}"
+        headers.append(label)
+    return _deduplicate_headers(headers)
+
+
+def _header_text(value: Any) -> str:
+    return "" if pd.isna(value) else str(value).strip()
+
+
+def _deduplicate_headers(headers: list[str]) -> list[str]:
+    counts: dict[str, int] = {}
+    unique: list[str] = []
+    for header in headers:
+        counts[header] = counts.get(header, 0) + 1
+        unique.append(header if counts[header] == 1 else f"{header}__{counts[header]}")
+    return unique
+
+
+def _apply_row_selector(frame: pd.DataFrame, selector: Any, sheet: str) -> pd.DataFrame:
+    if selector is None:
+        return frame.reset_index(drop=True)
+    if not isinstance(selector, Mapping):
+        raise ValueError(f"sheet {sheet!r}: row_selector must be an object")
+    column = str(selector.get("column", ""))
+    if column not in frame.columns:
+        raise ValueError(f"sheet {sheet!r}: row_selector column {column!r} was not found")
+    values = frame[column]
+    case_sensitive = bool(selector.get("case_sensitive", False))
+
+    def normalized(value: Any) -> str:
+        text = "" if pd.isna(value) else str(value).strip()
+        return text if case_sensitive else text.casefold()
+
+    if "equals" in selector:
+        expected = normalized(selector["equals"])
+        mask = values.map(normalized) == expected
+    elif "in" in selector:
+        choices = selector["in"]
+        if not isinstance(choices, (list, tuple, set)):
+            raise ValueError(f"sheet {sheet!r}: row_selector.in must be a list")
+        allowed = {normalized(item) for item in choices}
+        mask = values.map(normalized).isin(allowed)
+    elif selector.get("not_empty") is True:
+        mask = values.map(normalized) != ""
+    else:
+        raise ValueError(f"sheet {sheet!r}: row_selector requires equals, in, or not_empty")
+    return frame.loc[mask].reset_index(drop=True)
 
 
 def normalize_salary_schema(raw_bundle: Mapping[str, pd.DataFrame], mapping_spec: SheetMappingSpec) -> tuple[list[EmployeeMaster], CompanyConfig]:
@@ -105,9 +219,13 @@ def normalize_salary_schema(raw_bundle: Mapping[str, pd.DataFrame], mapping_spec
                 key, value = row.get("key"), row.get("value")
                 if pd.notna(key): company_fields[str(key)] = _scalar(value)
             continue
-        for row in renamed.dropna(how="all").to_dict("records"):
+        seen_in_sheet: set[str] = set()
+        for row_number, row in enumerate(renamed.dropna(how="all").to_dict("records"), start=1):
             employee_id = _text(row.pop("employee_id", None))
             if not employee_id: continue
+            if employee_id in seen_in_sheet:
+                raise ValueError(f"duplicate employee_id {employee_id!r} in salary sheet {sheet!r} (data row {row_number})")
+            seen_in_sheet.add(employee_id)
             employee_type = _text(row.pop("employee_type", "*")) or "*"
             attrs = {key: _scalar(value) for key, value in row.items() if pd.notna(value)}
             prior = employees.get(employee_id)
@@ -138,7 +256,44 @@ def normalize_attendance(raw_bundle: Mapping[str, pd.DataFrame], mapping_spec: S
                         "map each canonical field from only one source sheet"
                     )
                 merged[key] = value
+    for attributes in records.values():
+        _add_derived_attendance_fields(attributes)
     return [AttendanceRecord(employee_id, period, attrs) for employee_id, attrs in records.items()]
+
+
+def _add_derived_attendance_fields(attributes: dict[str, Any]) -> None:
+    """Add safe, workbook-independent attendance aggregates.
+
+    ``overtime_hours`` is deliberately an aggregate only.  Payroll FormulaSpec
+    rules must still consume concrete OT variants (day/night x normal/rest/
+    holiday) so each rate is applied correctly.  ``is_full_month`` is based on
+    paid days rather than actual worked days, which includes paid leave/holidays
+    in the payroll period.
+    """
+    overtime_components = [
+        value for key, value in attributes.items()
+        if key != "overtime_hours" and _is_ot_component(key) and isinstance(value, (int, float))
+    ]
+    if overtime_components and "overtime_hours" not in attributes:
+        attributes["overtime_hours"] = float(sum(overtime_components))
+
+    scheduled = _first_numeric(attributes, "scheduled_working_days", "standard_working_days")
+    paid_days = _first_numeric(attributes, "days_with_salary", "actual_paid_day")
+    if scheduled is not None and paid_days is not None and "is_full_month" not in attributes:
+        attributes["is_full_month"] = paid_days >= scheduled
+
+
+def _is_ot_component(field_code: str) -> bool:
+    normalized = field_code.lower()
+    return normalized.startswith("salary_ot_") or (normalized.startswith("ot_") and normalized.endswith("_hours"))
+
+
+def _first_numeric(attributes: Mapping[str, Any], *field_codes: str) -> float | None:
+    for field_code in field_codes:
+        value = attributes.get(field_code)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
 
 
 def validate_ingested_data(employees: list[EmployeeMaster], attendance: list[AttendanceRecord], period: str) -> DataValidationResult:
@@ -171,6 +326,7 @@ def _text(value: Any) -> str:
     return str(value).strip()
 def _scalar(value: Any) -> Any: return _number_or_text(value)
 def _number_or_text(value: Any) -> Any:
+    if isinstance(value, bool): return value
     if isinstance(value, (int, float)) and not isinstance(value, bool): return float(value)
     return _text(value)
 def _hours(value: Any) -> float:

@@ -6,9 +6,7 @@ from datetime import date
 from io import BytesIO
 import json
 import mimetypes
-import re
 import sys
-import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -20,10 +18,13 @@ from openpyxl import Workbook
 
 from payroll.anomaly_router import can_publish
 from payroll.engine import run_payroll
+from payroll.field_catalog import canonical_field_code, is_known_field_code, normalize_field_label
+from payroll.field_catalog import suggested_field_code as catalog_suggested_field_code
 from payroll.formula import (FormulaCandidateStore, FormulaExtractionError, ReviewStatus, ValidationContext,
                              activate_formula_version, extract_formula, formula_to_engine_dict,
                              render_for_review, review_formula, validate_formula)
-from payroll.ingestion import SheetMappingSpec, normalize_attendance, normalize_salary_schema, validate_ingested_data
+from payroll.ingestion import (DERIVED_ATTENDANCE_FIELD_CODES, SheetMappingSpec, normalize_attendance,
+                               normalize_salary_schema, read_payroll_sheet, validate_ingested_data)
 from policy_update.parsers.base_parser import DocumentRole, ParseRequest, Persistence, SourceRef
 from policy_update.parsers.excel_parser import ExcelParser
 from policy_update.parsers.parser_factory import ParserFactory
@@ -74,8 +75,175 @@ def workbook_sheet_names(data: bytes) -> list[str]:
 
 
 @st.cache_data(show_spinner=False)
-def workbook_sheet(data: bytes, sheet_name: str, header_row: int) -> pd.DataFrame:
-    return pd.read_excel(BytesIO(data), sheet_name=sheet_name, header=header_row - 1).dropna(how="all")
+def workbook_sheet(data: bytes, sheet_name: str, header_row: int, layout: dict[str, Any] | None = None) -> pd.DataFrame:
+    config = {"header_row": header_row - 1, **(layout or {})}
+    return read_payroll_sheet(BytesIO(data), sheet_name, config)
+
+
+def _excel_row_list(raw: str) -> list[int]:
+    rows = [int(item.strip()) for item in raw.split(",") if item.strip()]
+    if not rows or any(row < 1 for row in rows):
+        raise ValueError("Nhập ít nhất một số dòng Excel dương, phân cách bằng dấu phẩy.")
+    return sorted(set(rows))
+
+
+def payroll_layout_editor(data: bytes, sheet_name: str, header_row: int, key_prefix: str) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Render optional, template-specific payroll layout controls and load its records."""
+    layout: dict[str, Any] = {}
+    with st.expander("Cấu hình layout nâng cao", expanded=False):
+        use_multi_header = st.checkbox("Header nhiều tầng", key=f"{key_prefix}_use_multi_header")
+        if use_multi_header:
+            header_rows_text = st.text_input(
+                "Các dòng header (Excel, phân cách bằng dấu phẩy)", f"{header_row},{header_row + 1}",
+                key=f"{key_prefix}_header_rows",
+            )
+            try:
+                header_rows = _excel_row_list(header_rows_text)
+            except ValueError as exc:
+                st.error(str(exc)); st.stop()
+            layout["header_rows"] = header_rows
+            layout["data_start_row"] = int(st.number_input(
+                "Dòng dữ liệu đầu tiên", min_value=max(header_rows) + 1, value=max(header_rows) + 1,
+                key=f"{key_prefix}_data_start_row",
+            ))
+
+    try:
+        frame = workbook_sheet(data, sheet_name, header_row, layout)
+    except ValueError as exc:
+        st.error(f"Không thể đọc layout của sheet {sheet_name}: {exc}"); st.stop()
+
+    with st.expander("Lọc dòng dữ liệu (tuỳ chọn)", expanded=False):
+        use_selector = st.checkbox("Chỉ lấy các dòng thỏa điều kiện", key=f"{key_prefix}_use_row_selector")
+        if use_selector:
+            selector_column = st.selectbox("Cột dùng để lọc", [str(column) for column in frame.columns],
+                                           key=f"{key_prefix}_selector_column")
+            selector_mode = st.selectbox("Điều kiện", ["Bằng", "Thuộc danh sách", "Không rỗng"],
+                                         key=f"{key_prefix}_selector_mode")
+            if selector_mode == "Bằng":
+                value = st.text_input("Giá trị", key=f"{key_prefix}_selector_equals")
+                if value.strip(): layout["row_selector"] = {"column": selector_column, "equals": value}
+            elif selector_mode == "Thuộc danh sách":
+                values = st.text_input("Các giá trị (phân cách bằng dấu phẩy)", key=f"{key_prefix}_selector_in")
+                parsed = [item.strip() for item in values.split(",") if item.strip()]
+                if parsed: layout["row_selector"] = {"column": selector_column, "in": parsed}
+            else:
+                layout["row_selector"] = {"column": selector_column, "not_empty": True}
+
+    if layout.get("row_selector"):
+        try:
+            frame = workbook_sheet(data, sheet_name, header_row, layout)
+        except ValueError as exc:
+            st.error(f"Không thể lọc sheet {sheet_name}: {exc}"); st.stop()
+    return frame, layout
+
+
+def employee_id_score(column: str) -> int:
+    """Score common employee-ID headers without relying on a particular language."""
+    label = normalize_field_label(column)
+    exact_scores = {
+        "ma_cham_cong": 100, "attendance_id": 100, "ma_tl": 90,
+        "employee_id": 85, "ma_nhan_vien": 80, "ma_nv": 75,
+        "ms_nv": 75, "msnv": 75, "ma_he_thong": 40,
+    }
+    if label in exact_scores:
+        return exact_scores[label]
+    if "employee" in label and ("id" in label or "code" in label):
+        return 70
+    return 0
+
+
+def suggested_employee_id_column(columns: list[str]) -> str | None:
+    """Return the strongest employee-ID candidate, if the sheet has one."""
+    ranked = [(employee_id_score(column), -index, column) for index, column in enumerate(columns)]
+    score, _index, column = max(ranked, default=(0, 0, None))
+    return column if score else None
+
+
+def workbook_mapping_suggestions(data: bytes, sheet_names: list[str], formula: dict[str, Any]) -> dict[str, Any]:
+    """Suggest sheet, header row, ID and input columns required by a FormulaSpec.
+
+    The scan is deliberately limited to the first 20 rows of each sheet: this
+    catches report-style multi-row headers without reading large attendance
+    sheets into memory before the HR user has confirmed the mapping.
+    """
+    required = {
+        source: {canonical_field_code(code) or code: code for code in formula_codes_for_source(formula, source)}
+        for source in ("employee", "attendance")
+    }
+    candidates: dict[str, list[dict[str, Any]]] = {"employee": [], "attendance": []}
+    try:
+        with pd.ExcelFile(BytesIO(data)) as workbook:
+            for sheet in sheet_names:
+                preview = pd.read_excel(workbook, sheet_name=sheet, header=None, nrows=20)
+                for header_index in range(len(preview.index)):
+                    headers = [str(value).strip() for value in preview.iloc[header_index].tolist()
+                               if pd.notna(value) and str(value).strip()]
+                    if not headers:
+                        continue
+                    employee_id = suggested_employee_id_column(headers)
+                    if not employee_id:
+                        continue
+                    sheet_label = normalize_field_label(sheet)
+                    for source, required_codes in required.items():
+                        fields: dict[str, str] = {}
+                        for header in headers:
+                            suggested = canonical_field_code(catalog_suggested_field_code(header, source=source))
+                            target = required_codes.get(suggested or "")
+                            if target and target not in fields:
+                                fields[target] = header
+                        if not fields:
+                            continue
+                        source_bonus = 0
+                        if source == "employee":
+                            source_bonus = 15 if any(token in sheet_label for token in ("nhan_vien", "cong_nhan", "employee", "master")) else 0
+                            source_bonus -= 8 if any(token in sheet_label for token in ("bang_luong", "payroll", "cham_cong")) else 0
+                        score = len(fields) * 100 + employee_id_score(employee_id) + source_bonus - header_index
+                        candidates[source].append({"sheet": sheet, "header_row": header_index + 1,
+                                                   "employee_id": employee_id, "fields": fields, "score": score})
+    except Exception:
+        # The existing per-sheet reader reports the detailed parsing error.
+        return {"employee": None, "attendance": []}
+
+    employee = max(candidates["employee"], key=lambda item: item["score"], default=None)
+    attendance: list[dict[str, Any]] = []
+    for field_code in required["attendance"].values():
+        options = [item for item in candidates["attendance"] if field_code in item["fields"]]
+        if not options:
+            continue
+        best = max(options, key=lambda item: item["score"])
+        existing = next((item for item in attendance if item["sheet"] == best["sheet"] and item["header_row"] == best["header_row"]), None)
+        if existing:
+            existing["fields"].update({field_code: best["fields"][field_code]})
+        else:
+            attendance.append({**best, "fields": {field_code: best["fields"][field_code]}})
+    return {"employee": employee, "attendance": attendance}
+
+
+def mapping_suggestion_rows(suggestions: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for source, entries in (("employee", [suggestions["employee"]] if suggestions.get("employee") else []),
+                            ("attendance", suggestions.get("attendance", []))):
+        for entry in entries:
+            for field_code, column in entry["fields"].items():
+                rows.append({"Nguồn": source, "Sheet đề xuất": entry["sheet"],
+                             "Dòng header": entry["header_row"], "Cột Excel": column,
+                             "Map thành": field_code})
+    return rows
+
+
+def derived_attendance_suggestion_rows(formula: dict[str, Any]) -> list[dict[str, Any]]:
+    """Explain attendance inputs that the ingestion layer calculates itself."""
+    expressions = {
+        "is_full_month": "days_with_salary >= scheduled_working_days",
+        "overtime_hours": "sum of mapped OT variant hours",
+    }
+    requested = {
+        canonical_field_code(item.get("field_code")) or item.get("field_code")
+        for item in formula.get("variables", []) if item.get("source") == "attendance"
+    }
+    return [{"Nguồn": "attendance (derived)", "Sheet đề xuất": "Tự tính khi ingest",
+             "Dòng header": "—", "Cột Excel": expressions[code], "Map thành": code}
+            for code in sorted(requested & DERIVED_ATTENDANCE_FIELD_CODES)]
 
 
 DEFAULT_FIELD_CODES = ("BASIC, base_salary, monthly_salary, internal_allowance_amount, insurance_fee, "
@@ -157,57 +325,20 @@ def excel_features(data: bytes, name: str) -> tuple[list[dict[str, Any]], list[s
 
 
 def normalized_label(value: str) -> str:
-    """Compare Excel headers independently of accents, punctuation and case."""
-    value = unicodedata.normalize("NFKD", str(value).lower().replace("đ", "d"))
-    value = "".join(char for char in value if not unicodedata.combining(char))
-    return re.sub(r"[^a-z0-9]+", " ", value).strip()
+    """Compatibility wrapper around the shared spreadsheet/formula vocabulary."""
+    return normalize_field_label(value).replace("_", " ")
 
 
 def suggest(columns: list[str], words: tuple[str, ...]) -> str:
     for column in columns:
-        value = column.lower().replace("đ", "d")
         value = normalized_label(column)
         if any(word in value for word in words): return column
     return NONE
 
 
-_OT_RATE_RE = re.compile(r"(150|200|300)")
-
-
-def _suggest_ot_field_code(normalized_name: str) -> str:
-    """Disambiguate OT columns by shift/day-type/rate (SALARY_OT taxonomy), so two
-    different OT columns (e.g. '...150%' and '...300%') never collapse onto the same
-    field_code the way a single flat 'tang ca' -> 'ot_..._hours' rule would."""
-    shift = "night" if re.search(r"\bdem\b", normalized_name) else "day"
-    if re.search(r"\ble\b", normalized_name):
-        day_type = "holiday"
-    elif re.search(r"\bnghi\b|\brest\b", normalized_name):
-        day_type = "rest"
-    else:
-        day_type = "normal"
-    rate_match = _OT_RATE_RE.search(normalized_name)
-    rate = rate_match.group(1) if rate_match else "150"
-    return f"salary_ot_{shift}_{day_type}_{rate}"
-
-
-def suggested_field_code(column: str) -> str:
-    """Useful defaults; HR may freely replace these with company-specific codes."""
-    name = column.lower().replace("đ", "d")
-    name = normalized_label(column)
-    if any(term in name for term in ("luong cb", "luong thang", "muc luong", "tien luong")): return "basic_salary"
-    if any(term in name for term in ("so cong", "ngay lam viec", "cong thuc te")): return "total_working_days"
-    if any(term in name for term in ("cong chuan", "dinh muc cong")): return "standard_working_days"
-    if any(term in name for term in ("tang ca", "gio tang ca", "lam them")): return _suggest_ot_field_code(name)
-    if any(term in name for term in ("gio ca dem", "lam dem")): return "night_shift_hours"
-    if "luong co ban" in name or "basic" in name: return "basic_salary"
-    if "ngay cong chuan" in name or "standard" in name: return "standard_working_days"
-    if "ngay cong" in name or "worked" in name: return "total_working_days"
-    if "ot" in name or "overtime" in name: return _suggest_ot_field_code(name)
-    if "ca dem" in name or "night" in name: return "night_shift_hours"
-    if "phep" in name or "leave" in name: return "annual_leave_days"
-    if "thai san" in name or "maternity" in name: return "maternity_leave_days"
-    if "tam ung" in name or "advance" in name: return "salary_advance"
-    return re.sub(r"\W+", "_", name).strip("_") or "field"
+def suggested_field_code(column: str, source: str | None = None) -> str:
+    """Use the same canonical vocabulary as FormulaSpec extraction."""
+    return catalog_suggested_field_code(column, source=source)
 
 
 def field_mappings(columns: list[str], employee_id_column: str, key_prefix: str) -> dict[str, str]:
@@ -222,36 +353,80 @@ def field_mappings(columns: list[str], employee_id_column: str, key_prefix: str)
 
 
 def suggested_field_mappings(columns: list[str], employee_id_column: str, key_prefix: str,
-                             required_codes: set[str]) -> dict[str, str]:
+                             required_codes: set[str], *, source: str) -> dict[str, str]:
     """Editable mapping with conservative automatic field selection."""
     candidates = [column for column in columns if column != employee_id_column]
-    defaults = [column for column in candidates if suggested_field_code(column) in required_codes]
+    required_by_canonical = {canonical_field_code(code) or code: code for code in required_codes}
+    suggested = {column: suggested_field_code(column, source=source) for column in candidates}
+    defaults = [column for column in candidates if suggested[column] in required_by_canonical]
     if required_codes and not defaults:
         st.info("Chưa nhận ra tên cột theo FormulaSpec. Hãy chọn cột bên dưới; app sẽ đề xuất mã trường khi bạn chọn.")
     selected = st.multiselect("Các cột dùng cho payroll", candidates, default=defaults, key=f"{key_prefix}_columns",
                               help="Đã gợi ý từ tên cột và FormulaSpec; bạn có thể thêm hoặc bỏ cột.")
     mapping = {employee_id_column: "employee_id"}
     for column in selected:
-        mapping[column] = st.text_input(f"Tên trường chuẩn cho ‘{column}’", suggested_field_code(column),
+        default = required_by_canonical.get(suggested[column], suggested[column])
+        mapping[column] = st.text_input(f"Tên trường chuẩn cho ‘{column}’", default,
                                         key=f"{key_prefix}_{column}").strip()
     return {source: target for source, target in mapping.items() if target}
 
 
 def formula_required_codes(formula: dict[str, Any]) -> set[str]:
+    # Keep the FormulaSpec's exact code in the emitted mapping.  Matching is
+    # canonicalized in suggested_field_mappings, but InputMapper later looks up
+    # this exact integration key.
     return {str(item.get("field_code")) for item in formula.get("variables", [])
-            if item.get("source") in {"employee", "attendance"} and item.get("field_code")}
+            if item.get("source") in {"employee", "attendance"} and item.get("field_code")
+            and not (item.get("source") == "attendance"
+                     and (canonical_field_code(item.get("field_code")) or item.get("field_code"))
+                     in DERIVED_ATTENDANCE_FIELD_CODES)}
 
 
 def formula_codes_for_source(formula: dict[str, Any], source: str) -> set[str]:
     """Return only the spreadsheet fields consumed from one input source."""
     return {str(item.get("field_code")) for item in formula.get("variables", [])
-            if item.get("source") == source and item.get("field_code")}
+            if item.get("source") == source and item.get("field_code")
+            and not (source == "attendance"
+                     and (canonical_field_code(item.get("field_code")) or item.get("field_code"))
+                     in DERIVED_ATTENDANCE_FIELD_CODES)}
 
 
 def mapping_for_codes(mapping: dict[str, str], codes: set[str]) -> dict[str, str]:
     """Keep the ID plus fields required by a particular payroll input."""
     return {column: field for column, field in mapping.items()
-            if field == "employee_id" or field in codes}
+            if field == "employee_id" or (canonical_field_code(field) or field) in codes}
+
+
+def mapping_contract_errors(formula: dict[str, Any], employee_mapping: dict[str, str],
+                            attendance_mappings: dict[str, dict[str, Any]]) -> list[str]:
+    """Report every missing or source-incompatible FormulaSpec input before runtime."""
+    errors: list[str] = []
+    mapped_by_source = {
+        "employee": {canonical_field_code(code) or code for code in employee_mapping.values()},
+        "attendance": {
+            canonical_field_code(code) or code
+            for spec in attendance_mappings.values() for code in spec.get("columns", {}).values()
+        },
+    }
+    for variable in formula.get("variables", []):
+        source, raw_code = variable.get("source"), variable.get("field_code")
+        if source not in mapped_by_source or not raw_code:
+            continue
+        code = canonical_field_code(raw_code) or str(raw_code)
+        if source == "attendance" and code in DERIVED_ATTENDANCE_FIELD_CODES:
+            continue
+        if is_known_field_code(code) and not is_known_field_code(code, source):
+            errors.append(f"{code} phải lấy từ nguồn dữ liệu khác, không phải {source}.")
+        if code not in mapped_by_source[source]:
+            errors.append(f"Thiếu map cột cho FormulaSpec: {code} ({source}).")
+    return errors
+
+
+def reset_mapping_widgets() -> None:
+    """A new FormulaSpec must not inherit selections made for an older contract."""
+    for key in list(st.session_state):
+        if key == "employee_columns" or key.startswith("employee_") or key.startswith("field_"):
+            del st.session_state[key]
 
 
 def review_sample_defaults(formula: dict[str, Any]) -> dict[str, float | bool]:
@@ -390,6 +565,7 @@ if guide:
     st.session_state.messages.append({"role": "user", "content": guide})
     try:
         candidate = formula_candidate_from_text(guide, [{"source": "hr_chat", "text": guide}])
+        reset_mapping_widgets()
         st.session_state.formula_store = FormulaCandidateStore()
         st.session_state.formula_store.save(candidate)
         st.session_state.formula_candidate = candidate
@@ -410,6 +586,7 @@ if policy_file and st.button("Trích xuất công thức từ tài liệu"):
         text, warnings, evidence = document_text(policy_file)
         if not text: raise ValueError("Tài liệu không có văn bản trích xuất được; PDF scan cần OCR.")
         candidate = formula_candidate_from_text(text, evidence)
+        reset_mapping_widgets()
         st.session_state.formula_store = FormulaCandidateStore()
         st.session_state.formula_store.save(candidate)
         st.session_state.formula_candidate = candidate
@@ -524,49 +701,70 @@ except Exception as exc:
     st.error(f"Excel Parser không thể đọc workbook: {exc}"); st.stop()
 
 st.subheader("3. Mapping các sheet vào dữ liệu payroll")
-employee_sheet = st.selectbox("Sheet nhân viên/lương cơ bản", sheet_names)
-employee_header = st.number_input("Dòng header sheet nhân viên", 1, value=1)
-employee_frame = workbook_sheet(data, employee_sheet, int(employee_header))
+formula_for_mapping = st.session_state.formula or (formula_to_engine_dict(candidate.proposed_spec) if candidate else default_formula("UPLOAD"))
+mapping_suggestions = workbook_mapping_suggestions(data, sheet_names, formula_for_mapping)
+suggested_rows = mapping_suggestion_rows(mapping_suggestions) + derived_attendance_suggestion_rows(formula_for_mapping)
+if suggested_rows:
+    with st.expander("Gợi ý mapping từ FormulaSpec", expanded=True):
+        st.caption("Gợi ý được suy ra từ các biến FormulaSpec và header trong workbook. Hãy kiểm tra trước khi tính lương.")
+        st.dataframe(pd.DataFrame(suggested_rows), hide_index=True, use_container_width=True)
+
+suggested_employee = mapping_suggestions.get("employee")
+suggested_employee_sheet = suggested_employee["sheet"] if suggested_employee else sheet_names[0]
+employee_sheet = st.selectbox("Sheet nhân viên/lương cơ bản", sheet_names,
+                             index=sheet_names.index(suggested_employee_sheet))
+employee_header_default = suggested_employee["header_row"] if suggested_employee and suggested_employee["sheet"] == employee_sheet else 1
+employee_header = st.number_input("Dòng header sheet nhân viên", 1, value=employee_header_default)
+employee_frame, employee_layout = payroll_layout_editor(data, employee_sheet, int(employee_header), "employee_layout")
 employee_columns = [str(value) for value in employee_frame.columns]
 st.dataframe(employee_frame.head(8), hide_index=True, use_container_width=True)
+detected_employee_id = suggested_employee_id_column(employee_columns)
 employee_id = st.selectbox("Cột mã nhân viên của sheet nhân viên", employee_columns,
-                          index=employee_columns.index(suggest(employee_columns, ("mã nv", "ma nv", "employee_id"))) if suggest(employee_columns, ("mã nv", "ma nv", "employee_id")) in employee_columns else 0)
-formula_for_mapping = st.session_state.formula or (formula_to_engine_dict(candidate.proposed_spec) if candidate else default_formula("UPLOAD"))
-employee_map = suggested_field_mappings(employee_columns, employee_id, "employee", formula_required_codes(formula_for_mapping))
+                          index=employee_columns.index(detected_employee_id) if detected_employee_id in employee_columns else 0)
+employee_map = suggested_field_mappings(employee_columns, employee_id, "employee", formula_required_codes(formula_for_mapping),
+                                        source="employee")
 
 attendance_mode = st.radio(
     "Nguồn dữ liệu chấm công / phụ cấp",
     ["Dùng sheet nhân viên", "Chọn một hoặc nhiều sheet khác"],
+    index=1 if mapping_suggestions.get("attendance") else 0,
     horizontal=True,
     help="Chọn nhiều sheet khi dữ liệu ca đêm, phép năm, thai sản hoặc OT được tách riêng. Các dòng cùng mã nhân viên sẽ được gộp.",
 )
 source_sheets: list[str] = []
 if attendance_mode == "Chọn một hoặc nhiều sheet khác":
+    suggested_attendance = [item["sheet"] for item in mapping_suggestions.get("attendance", [])
+                             if item["sheet"] != employee_sheet]
     source_sheets = st.multiselect(
         "Chọn các sheet dữ liệu payroll",
         [name for name in sheet_names if name != employee_sheet],
+        default=suggested_attendance,
         help="Có thể chọn nhiều sheet cùng lúc, ví dụ: Ca đêm, Phép năm, Thai sản và OT.",
     )
 attendance_raw: dict[str, pd.DataFrame] = {}
 attendance_specs: dict[str, dict[str, Any]] = {}
 for sheet in source_sheets:
     with st.expander(f"Map sheet: {sheet}", expanded=True):
-        header = st.number_input(f"Dòng header — {sheet}", 1, value=1, key=f"header_{sheet}")
-        frame = workbook_sheet(data, sheet, int(header))
+        suggested_sheet = next((item for item in mapping_suggestions.get("attendance", []) if item["sheet"] == sheet), None)
+        suggested_header = suggested_sheet["header_row"] if suggested_sheet else 1
+        header = st.number_input(f"Dòng header — {sheet}", 1, value=suggested_header, key=f"header_{sheet}")
+        frame, layout = payroll_layout_editor(data, sheet, int(header), f"layout_{sheet}")
         columns = [str(value) for value in frame.columns]
-        detected_id = suggest(columns, ("ma nv", "ma nhan vien", "employee id"))
+        detected_id = suggested_employee_id_column(columns)
         if detected_id in columns:
             columns = [detected_id, *[column for column in columns if column != detected_id]]
         st.dataframe(frame.head(6), hide_index=True, use_container_width=True)
         employee_column = st.selectbox(f"Cột mã nhân viên — {sheet}", columns, key=f"id_{sheet}")
         attendance_raw[sheet] = frame
-        attendance_specs[sheet] = {"columns": suggested_field_mappings(columns, employee_column, f"field_{sheet}", formula_codes_for_source(formula_for_mapping, "attendance"))}
+        attendance_specs[sheet] = {**layout, "columns": suggested_field_mappings(
+            columns, employee_column, f"field_{sheet}", formula_codes_for_source(formula_for_mapping, "attendance"),
+            source="attendance")}
 
 if attendance_mode == "Dùng sheet nhân viên":
     active_formula = formula_for_mapping
     source_sheets = [employee_sheet]
     attendance_raw = {employee_sheet: employee_frame}
-    attendance_specs = {employee_sheet: {"columns": mapping_for_codes(
+    attendance_specs = {employee_sheet: {**employee_layout, "columns": mapping_for_codes(
         employee_map, formula_codes_for_source(active_formula, "attendance"))}}
 
 with st.expander("Cấu hình chạy payroll"):
@@ -588,8 +786,12 @@ if st.button("Xác nhận công thức & tính lương", type="primary"):
         st.error("FormulaSpec chưa được Activate."); st.stop()
     if not source_sheets:
         st.error("Chọn ít nhất một sheet nguồn (chấm công/ca đêm/phép/thai sản/OT)."); st.stop()
+    mapping_errors = mapping_contract_errors(formula, employee_map, attendance_specs)
+    if mapping_errors:
+        st.error("Mapping chưa khớp FormulaSpec: " + " | ".join(mapping_errors)); st.stop()
     try:
-        employees, company = normalize_salary_schema({employee_sheet: employee_frame}, SheetMappingSpec(company_id, "salary_schema", {employee_sheet: {"columns": employee_map}}))
+        employees, company = normalize_salary_schema({employee_sheet: employee_frame}, SheetMappingSpec(
+            company_id, "salary_schema", {employee_sheet: {**employee_layout, "columns": employee_map}}))
         records = normalize_attendance(attendance_raw, SheetMappingSpec(company_id, "attendance", attendance_specs), period)
         validation = validate_ingested_data(employees, records, period)
         if not validation.passed:
