@@ -109,8 +109,11 @@ def find_employee_id_column(columns: list[str]) -> str | None:
     )
 
 
-def read_excel_sheet(data: bytes, sheet_name: str, header_row: int) -> pd.DataFrame:
-    return read_payroll_sheet(BytesIO(data), sheet_name, {"header_row": header_row - 1})
+def read_excel_sheet(data: bytes, sheet_name: str, header_row: int, data_start_row: int | None = None) -> pd.DataFrame:
+    config: dict[str, Any] = {"header_row": header_row - 1}
+    if data_start_row is not None:
+        config["data_start_row"] = data_start_row
+    return read_payroll_sheet(BytesIO(data), sheet_name, config)
 
 
 def raw_excel_preview(data: bytes, sheet_name: str) -> pd.DataFrame:
@@ -325,9 +328,16 @@ except Exception as exc:
 header_row = st.number_input(
     "Dòng chứa tên cột (header)", min_value=1, value=1, step=1
 )
+data_start_row = st.number_input(
+    "Dòng bắt đầu dữ liệu thật (bỏ các dòng rác/phụ đề ngay dưới header nếu có)",
+    min_value=int(header_row) + 1,
+    value=int(header_row) + 1,
+    step=1,
+    help="Ví dụ: header ở dòng 4 nhưng dòng 5, 6 là dòng rác thì đặt số này là 7.",
+)
 
 try:
-    frame = read_excel_sheet(excel_data, selected_sheet, int(header_row))
+    frame = read_excel_sheet(excel_data, selected_sheet, int(header_row), int(data_start_row))
 except Exception as exc:
     st.error(f"Không thể đọc sheet với dòng header đã chọn: {exc}")
     st.stop()

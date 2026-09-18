@@ -335,10 +335,15 @@ def _sanitize_identifiers(payload: dict[str, Any]) -> dict[str, Any]:
     used_names: set[str] = set()
     rename_map: dict[str, str] = {}
 
-    def resolve(raw_name: str) -> str:
+    def resolve(raw_name: str, forced: str | None = None) -> str:
         raw_name = str(raw_name or "")
         if raw_name in rename_map:
             return rename_map[raw_name]
+        if forced:
+            candidate = forced if forced not in used_names else _slugify_identifier(forced, used_names)
+            used_names.add(candidate)
+            rename_map[raw_name] = candidate
+            return candidate
         if raw_name.isidentifier() and raw_name not in used_names:
             used_names.add(raw_name)
             return raw_name
@@ -357,9 +362,18 @@ def _sanitize_identifiers(payload: dict[str, Any]) -> dict[str, Any]:
     variables = []
     for item in payload.get("variables", []):
         item = dict(item)
-        item["name"] = resolve(item.get("name", ""))
+        raw_name = item.get("name", "")
         _normalize_variable_source(item)
         item["field_code"] = _canonical_field_code(item.get("field_code"), item.get("source"))
+        field_code = item.get("field_code")
+        forced_name = (
+            field_code
+            if item.get("source") in {"employee", "attendance"}
+            and field_code
+            and str(field_code).isidentifier()
+            else None
+        )
+        item["name"] = resolve(raw_name, forced_name)
         variables.append(item)
 
     rules = []
