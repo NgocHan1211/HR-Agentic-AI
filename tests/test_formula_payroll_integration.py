@@ -69,7 +69,7 @@ def test_reviewed_formula_spec_runs_in_payroll_engine() -> None:
         company_id="test-company",
         calculation_basis="monthly",
         variables=(
-            FormulaVariable("base_salary", "employee", field_code="base_salary"),
+            FormulaVariable("base_salary", "employee", field_code="basic_salary"),
             FormulaVariable("worked_days", "attendance", field_code="worked_days"),
             FormulaVariable("standard_days", "literal", value=22),
         ),
@@ -90,7 +90,7 @@ def test_reviewed_formula_spec_runs_in_payroll_engine() -> None:
     active_spec = activate_formula_version(store, "candidate-v1", context, effective_date=date(2026, 8, 1))
 
     result = PayrollEngine().run_payroll(
-        EmployeeMaster("EMP001", "test-company", attributes={"base_salary": 15_000_000}),
+        EmployeeMaster("EMP001", "test-company", attributes={"basic_salary": 15_000_000}),
         AttendanceRecord("EMP001", "2026-08", attributes={"worked_days": 20}),
         CompanyConfig("test-company"),
         active_spec,

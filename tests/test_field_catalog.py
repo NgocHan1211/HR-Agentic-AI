@@ -22,7 +22,7 @@ def test_formula_extractor_uses_the_same_shared_catalog() -> None:
 
     candidate = extract_formula("demo", "C", llm_client=SynonymLLM())
     assert [variable.field_code for variable in candidate.proposed_spec.variables] == [
-        "basic_salary", "total_working_days"
+        "basic_salary", "worked_days"
     ]
 
 

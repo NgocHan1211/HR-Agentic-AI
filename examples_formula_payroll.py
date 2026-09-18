@@ -33,7 +33,7 @@ def build_active_formula() -> FormulaSpec:
         company_id="demo-company",
         calculation_basis="monthly",
         variables=(
-            FormulaVariable("base_salary", "employee", field_code="base_salary"),
+            FormulaVariable("base_salary", "employee", field_code="basic_salary"),
             FormulaVariable("worked_days", "attendance", field_code="worked_days"),
             FormulaVariable("standard_days", "literal", value=22),
         ),
@@ -98,7 +98,7 @@ def main() -> None:
     employee = EmployeeMaster(
         employee_id="EMP001",
         company_id="demo-company",
-        attributes={"base_salary": 15_000_000},
+        attributes={"basic_salary": 15_000_000},
     )
     attendance = AttendanceRecord(
         employee_id="EMP001",

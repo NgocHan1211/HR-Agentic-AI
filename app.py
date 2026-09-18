@@ -352,6 +352,30 @@ employee_mapping, missing_employee = suggest_formula_column_mapping(
 attendance_mapping, missing_attendance = suggest_formula_column_mapping(
     columns, formula_inputs(formula, "attendance"), source="attendance"
 )
+
+# Header matching is intentionally conservative.  Let HR explicitly select a
+# source column when the business label is company-specific instead of forcing
+# them to rename their workbook or silently guessing a payroll input.
+manual_choices = ["— Chưa có cột tương ứng —", *[column for column in columns if column != employee_id_column]]
+missing_by_source = [("employee", field_code) for field_code in missing_employee]
+missing_by_source.extend(("attendance", field_code) for field_code in missing_attendance)
+if missing_by_source:
+    st.info("Một số trường trong công thức chưa được nhận diện tự động. Bạn có thể map thủ công nếu cột Excel có tên nội bộ.")
+    for source, field_code in missing_by_source:
+        selected_column = st.selectbox(
+            f"Cột Excel cho `{field_code}` ({'Hồ sơ nhân viên' if source == 'employee' else 'Chấm công'})",
+            manual_choices,
+            key=f"manual_mapping_{source}_{field_code}",
+        )
+        if selected_column == manual_choices[0]:
+            continue
+        if source == "employee":
+            employee_mapping[field_code] = selected_column
+        else:
+            attendance_mapping[field_code] = selected_column
+
+missing_employee = [field_code for field_code in missing_employee if field_code not in employee_mapping]
+missing_attendance = [field_code for field_code in missing_attendance if field_code not in attendance_mapping]
 missing = list(dict.fromkeys([*missing_employee, *missing_attendance]))
 
 st.subheader("4. Cột Excel đã được chuẩn hóa tự động")
@@ -383,6 +407,31 @@ if missing:
         "“Ngày công chuẩn”, “Ngày công thực tế”), rồi tải lại file. "
         "Các alias phổ biến đã được tự map; field riêng cần có header cùng tên với field_code trong công thức."
     )
+    if st.button("Tạo lại công thức chỉ dùng dữ liệu Excel hiện có", type="secondary"):
+        if not st.session_state.policy_text:
+            st.error("Không còn nội dung PDF trong phiên này. Hãy upload và đọc lại PDF.")
+        else:
+            available_columns = "\n".join(
+                f"- {column} (gợi ý mã: {suggested_field_code(column)})"
+                for column in columns
+                if column != employee_id_column
+            )
+            instruction = (
+                "\n\nRÀNG BUỘC WORKBOOK: Chỉ dùng biến employee/attendance khi map được vào một trong các cột "
+                "Excel sau. Nếu chính sách cần dữ liệu không có trong danh sách, bỏ quy tắc phụ thuộc vào dữ liệu đó "
+                "thay vì tạo biến giả định.\n"
+                + available_columns
+            )
+            try:
+                st.session_state.formula_candidate = extract_formula(
+                    st.session_state.policy_text + instruction,
+                    company_id,
+                    st.session_state.policy_evidence,
+                )
+                st.success("Đã tạo lại công thức theo các cột Excel hiện có.")
+                st.rerun()
+            except (FormulaExtractionError, ValueError) as exc:
+                st.error(f"Không thể tạo lại công thức: {exc}")
 else:
     st.success("Đã map đủ các cột mà công thức cần.")
 

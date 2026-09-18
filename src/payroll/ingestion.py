@@ -9,6 +9,8 @@ from typing import Any, Mapping
 
 import pandas as pd
 
+from .canonical_fields import canonical_field_code
+
 
 # These are calculated from mapped attendance counters, never selected from a
 # spreadsheet column.  Keep the list public so the mapping UI can omit them
@@ -211,7 +213,8 @@ def normalize_salary_schema(raw_bundle: Mapping[str, pd.DataFrame], mapping_spec
     company_fields: dict[str, Any] = {}
     for sheet, frame in raw_bundle.items():
         config = mapping_spec.sheets[sheet]; kind = config.get("kind", "employees")
-        renamed = frame.rename(columns=dict(config.get("columns", {})))
+        source = "employee" if kind == "employees" else None
+        renamed = frame.rename(columns=_canonicalized_columns(config.get("columns", {}), source))
         if kind == "rates":
             rates.extend(renamed.dropna(how="all").to_dict("records")); continue
         if kind == "company":
@@ -241,7 +244,8 @@ def normalize_attendance(raw_bundle: Mapping[str, pd.DataFrame], mapping_spec: S
     # them into one Engine input per employee, keyed by the shared employee ID.
     records: dict[str, dict[str, Any]] = {}
     for sheet, frame in raw_bundle.items():
-        config = mapping_spec.sheets[sheet]; renamed = frame.rename(columns=dict(config.get("columns", {})))
+        config = mapping_spec.sheets[sheet]
+        renamed = frame.rename(columns=_canonicalized_columns(config.get("columns", {}), "attendance"))
         for row in renamed.dropna(how="all").to_dict("records"):
             employee_id = _text(row.pop("employee_id", None))
             if not employee_id: continue
@@ -312,6 +316,14 @@ def validate_ingested_data(employees: list[EmployeeMaster], attendance: list[Att
 
 def _require_type(spec: SheetMappingSpec, expected: str) -> None:
     if spec.file_type != expected: raise ValueError(f"expected {expected} mapping")
+
+
+def _canonicalized_columns(columns: Mapping[str, Any], source: str | None) -> dict[str, str]:
+    """Normalize known mapping targets while retaining tenant-defined fields."""
+    return {str(column): canonical_field_code(field_code, source) or str(field_code)
+            for column, field_code in columns.items()}
+
+
 def _text(value: Any) -> str:
     """Return a stable key for values read from Excel.
 

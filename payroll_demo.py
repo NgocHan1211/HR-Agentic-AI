@@ -39,7 +39,7 @@ SAMPLE_FIXTURE: dict[str, Any] = {
     "employee": {
         "employee_id": "EMP001",
         "employee_type": "office",
-        "attributes": {"base_salary": 15_000_000},
+        "attributes": {"basic_salary": 15_000_000},
     },
     "attendance": {"attributes": {"worked_days": 20}},
     "company_config": {"rate_config": [], "attributes": {}},
@@ -47,7 +47,7 @@ SAMPLE_FIXTURE: dict[str, Any] = {
         "formula_id": "demo-monthly-v1",
         "calculation_basis": "monthly",
         "variables": [
-            {"name": "base_salary", "source": "employee", "field_code": "base_salary"},
+            {"name": "base_salary", "source": "employee", "field_code": "basic_salary"},
             {"name": "worked_days", "source": "attendance", "field_code": "worked_days"},
             {"name": "standard_days", "source": "literal", "value": 22},
         ],

@@ -84,7 +84,7 @@ def test_formula_extraction_normalizes_vietnamese_field_codes_to_shared_schema()
             ], "rules": [{"output_field": "BASIC", "expression": "luong"}]})
 
     candidate = extract_formula("demo", "C", llm_client=VietnameseFieldCodeLLM())
-    assert [item.field_code for item in candidate.proposed_spec.variables] == ["basic_salary", "total_working_days"]
+    assert [item.field_code for item in candidate.proposed_spec.variables] == ["basic_salary", "worked_days"]
 
 
 def test_formula_extraction_repairs_policy_sources_and_non_dsl_metadata() -> None:

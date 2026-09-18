@@ -13,7 +13,11 @@ import urllib.request
 from typing import Any, Protocol
 from uuid import uuid4
 
-from ..field_catalog import canonical_field_code
+from ..canonical_fields import (
+    canonical_field_code,
+    canonical_input_field_contract,
+    canonical_output_field_contract,
+)
 from .formula_schema import (ComponentCategory, ComponentRole, DayType, FormulaCandidate, FormulaRule,
                              FormulaSpec, FormulaVariable, OTAttributes, ShiftType)
 
@@ -35,6 +39,18 @@ def extract_formula(document_text: str, company_id: str, evidence_locations: lis
               "role?,ot_attributes?}], and rules [{output_field,expression,condition?,rounding?,section?,"
               "description?,category?,ot_attributes?}]. "
               "Sources must be employee, attendance, rate_config, regulatory, or literal. "
+              "Use this canonical input-field contract whenever a concept matches it: "
+              f"{canonical_input_field_contract()}. "
+              "Declare an employee or attendance input only when the policy explicitly requires it for an executable "
+              "rule. Do not add a generic payroll-template input (for example days_in_month, paid_days, "
+              "unpaid_leave_days, or allowance rates) merely because it is common in other payroll schemes. "
+              "Use these canonical result codes whenever a result matches them: "
+              f"{canonical_output_field_contract()}. "
+              "Do not create aliases, numbered duplicates such as basic_salary_2/service_fee_2, or a new field name "
+              "merely because the PDF uses a different label. A PDF label that cannot be mapped confidently to the "
+              "contract must not be used in an executable rule; describe it in the nearest variable description as "
+              "'unmapped source label: ...' and lower confidence. "
+              "Use only arithmetic and prorate, round_down, tax_bracket_vn; never calculate a salary. "
               "Use only arithmetic and prorate, round_down, tax_bracket_vn; for rule rounding use exactly "
               "'round' or 'round_down_<positive_unit>' such as 'round_down_1000', never bare 'round_down'; "
               "never calculate a salary. "
@@ -42,7 +58,7 @@ def extract_formula(document_text: str, company_id: str, evidence_locations: lis
               "letters, digits, underscores only, must not start with a digit, no spaces or accents "
               "(e.g. use 'luong_co_ban', not 'Lương cơ bản' or 'luong-co-ban'). "
               "For `employee` and `attendance` variables, `field_code` is a lowercase ASCII snake_case "
-              "integration code in English (e.g. `basic_salary`, `total_working_days`), never a Vietnamese display label. "
+              "integration code in English (e.g. `basic_salary`, `worked_days`), never a Vietnamese display label. "
               "`expression`/`condition` must reference variables and prior output_fields by that exact "
               "identifier. "
               "`category` classifies the component using the shared salary-component menu: one of "
@@ -68,6 +84,63 @@ def extract_formula(document_text: str, company_id: str, evidence_locations: lis
         raw_response = client.complete(system=system, user=document_text)
     except (OSError, RuntimeError) as exc:
         raise FormulaExtractionError(f"LLM extraction request failed: {str(exc)[:500]}") from exc
+    return _candidate_from_response(raw_response, company_id, evidence_locations)
+
+
+def repair_formula(
+    document_text: str,
+    candidate: FormulaCandidate,
+    validation_errors: list[str] | tuple[str, ...],
+    evidence_locations: list[dict[str, Any]] | None = None,
+    *,
+    llm_client: CompletionClient | None = None,
+) -> FormulaCandidate:
+    """Ask the LLM once to repair a rejected draft using deterministic validator errors.
+
+    This does not activate or silently approve a formula.  The repaired candidate is
+    sent through the same validator and still requires human review in the UI.
+    """
+    client = llm_client or _client_from_environment()
+    draft = {
+        "confidence": candidate.confidence,
+        "calculation_basis": candidate.proposed_spec.calculation_basis,
+        "variables": [_variable_to_payload(item) for item in candidate.proposed_spec.variables],
+        "rules": [_rule_to_payload(item) for item in candidate.proposed_spec.rules],
+    }
+    system = (
+        "You repair a payroll FormulaSpec draft. Return ONLY one valid JSON object with confidence, "
+        "calculation_basis, variables, and rules. Do not explain. The validator errors are authoritative. "
+        "Keep only calculations explicitly supported by the policy excerpt. Remove guessed rules rather than "
+        "inventing assumptions. Use the canonical input fields when applicable: "
+        f"{canonical_input_field_contract()}. Use canonical result codes when applicable: "
+        f"{canonical_output_field_contract()}. Do not create numbered duplicate outputs such as *_2. "
+        "Each rule output_field must be unique. Every identifier referenced in an expression must be either "
+        "a declared variable, an earlier unique output_field, or one of: prorate, round_down, tax_bracket_vn. "
+        "Do not invent values or variables just to silence an error: remove an unsupported rule or use a "
+        "properly declared variable only when the policy supports it. Sources must be employee, attendance, "
+        "rate_config, regulatory, or literal."
+    )
+    user = json.dumps(
+        {
+            "validator_errors": list(validation_errors),
+            "draft_to_repair": draft,
+            "policy_excerpt": document_text[:12000],
+        },
+        ensure_ascii=False,
+        default=str,
+    )
+    try:
+        raw_response = client.complete(system=system, user=user)
+    except (OSError, RuntimeError) as exc:
+        raise FormulaExtractionError(f"LLM repair request failed: {str(exc)[:500]}") from exc
+    return _candidate_from_response(raw_response, candidate.company_id, evidence_locations or candidate.source_evidence)
+
+
+def _candidate_from_response(
+    raw_response: str,
+    company_id: str,
+    evidence_locations: list[dict[str, Any]] | None,
+) -> FormulaCandidate:
     try:
         payload = _parse_json_response(raw_response)
     except json.JSONDecodeError as exc:
@@ -144,7 +217,27 @@ def _canonical_field_code(raw_code: Any, source: str | None) -> Any:
     """Translate known Vietnamese field aliases to the shared English contract."""
     if source not in {"employee", "attendance"} or raw_code is None:
         return raw_code
-    return canonical_field_code(raw_code)
+    return canonical_field_code(raw_code, source)
+
+
+_SOURCE_ALIASES = {
+    # Numbers explicitly written in a policy are constants, not a sixth data
+    # source.  Small models often call this source "policy" or "document".
+    "policy": "literal",
+    "document": "literal",
+    "policy_document": "literal",
+    "formula": "literal",
+    "constant": "literal",
+    "config": "rate_config",
+    "company_config": "rate_config",
+    "employee_data": "employee",
+    "timesheet": "attendance",
+}
+
+
+def _canonical_source(raw_source: Any) -> str:
+    source = str(raw_source or "literal").strip().lower().replace("-", "_").replace(" ", "_")
+    return _SOURCE_ALIASES.get(source, source)
 
 
 def _normalize_variable_source(item: dict[str, Any]) -> None:

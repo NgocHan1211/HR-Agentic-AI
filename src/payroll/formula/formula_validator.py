@@ -4,6 +4,7 @@ import ast
 from dataclasses import dataclass, field
 from typing import Iterable
 
+from ..canonical_fields import CANONICAL_INPUT_FIELDS, canonical_field_code
 from ..expression_evaluator import BUILTIN_FUNCTIONS
 from .formula_schema import ALLOWED_SECTIONS, DEDUCTION_CATEGORIES, FormulaCandidate, FormulaSpec
 
@@ -39,6 +40,18 @@ def validate_formula(candidate: FormulaCandidate, context: ValidationContext) ->
     for variable in variables.values():
         if variable.source not in context.allowed_variable_sources:
             errors.append(f"variable {variable.name}: source is not in the approved data contract: {variable.source}")
+        if variable.source in {"employee", "attendance"} and variable.field_code:
+            canonical_code = canonical_field_code(variable.field_code, variable.source)
+            if variable.field_code != canonical_code:
+                errors.append(
+                    f"variable {variable.name}: field_code {variable.field_code!r} is an alias; "
+                    f"use canonical code {canonical_code!r}"
+                )
+            elif canonical_code not in CANONICAL_INPUT_FIELDS:
+                warnings.append(
+                    f"variable {variable.name}: field_code {canonical_code!r} is a tenant-specific extension "
+                    "outside the shared canonical registry"
+                )
         if variable.source == "attendance" and str(variable.field_code or "").lower() in {"shift_type", "day_type"}:
             errors.append(
                 f"variable {variable.name}: {variable.field_code} is OT rule metadata, not a monthly attendance column; "

@@ -55,7 +55,7 @@ SALARY_MAPPING = SheetMappingSpec(
             "columns": {
                 "Mã NV": "employee_id",
                 "Họ và tên": "full_name",
-                "Lương cơ bản": "base_salary",
+                "Lương cơ bản": "basic_salary",
                 "Tạm ứng lương": "salary_advance",
             },
         },
@@ -70,13 +70,13 @@ ATTENDANCE_MAPPING = SheetMappingSpec(
             "columns": {
                 "Mã NV": "employee_id",
                 "Ngày công thực tế": "worked_days",
-                "Ngày công chuẩn": "standard_days",
+                "Ngày công chuẩn": "scheduled_work_days",
             },
         },
         "TangCa": {
             "columns": {
                 "Mã NV": "employee_id",
-                "Giờ tăng ca ngày thường 150%": "ot_day_150_hours",
+                "Giờ tăng ca ngày thường 150%": "ot_day_normal_150_hours",
                 "Giờ tăng ca đêm lễ 300%": "ot_night_holiday_300_hours",
             },
         },
@@ -94,11 +94,11 @@ def build_active_formula(sample_employee, sample_attendance, company_config) -> 
         company_id=COMPANY_ID,
         calculation_basis="monthly",
         variables=(
-            FormulaVariable("base_salary", "employee", field_code="base_salary"),
+            FormulaVariable("base_salary", "employee", field_code="basic_salary"),
             FormulaVariable("salary_advance", "employee", field_code="salary_advance"),
             FormulaVariable("worked_days", "attendance", field_code="worked_days"),
-            FormulaVariable("standard_days", "attendance", field_code="standard_days"),
-            FormulaVariable("ot_day_150_hours", "attendance", field_code="ot_day_150_hours"),
+            FormulaVariable("standard_days", "attendance", field_code="scheduled_work_days"),
+            FormulaVariable("ot_day_150_hours", "attendance", field_code="ot_day_normal_150_hours"),
             FormulaVariable("ot_night_holiday_300_hours", "attendance", field_code="ot_night_holiday_300_hours"),
             FormulaVariable("ot_day_150_rate", "literal", value=102_200),
             FormulaVariable("ot_night_holiday_300_rate", "literal", value=204_500),
