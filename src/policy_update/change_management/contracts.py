@@ -17,7 +17,7 @@ from datetime import date
 from enum import Enum
 from typing import Any
 
-from ...rag.rag_adapter import RetrievedEvidence, SearchResponse  # re-exported, see docstring above
+from rag.rag_adapter import RetrievedEvidence, SearchResponse  # re-exported, see module docstring above
 
 __all__ = ["DiffChangeType", "PolicyDiff", "RetrievedEvidence", "SearchResponse"]
 

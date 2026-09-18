@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Protocol
 
-from ...formula.formula_extractor import CompletionClient  # reuse the same LLM client contract
+from payroll.formula.formula_extractor import CompletionClient  # reuse the same LLM client contract
 from .changeset_schema import ChangeCategory, RiskLevel, default_risk_for_category
 from .contracts import PolicyDiff, RetrievedEvidence
 

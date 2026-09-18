@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...audit import log_audit
+from payroll.audit import log_audit
 
 
 class ChangeSetAuditEvent:

@@ -18,7 +18,7 @@ from ..parsers.base_parser import (
 
 try:
     # Package import path for repo installs / package-style usage.
-    from ...config import (
+    from config import (
         CHUNK_MAX_SIZE,
         CHUNK_MIN_SIZE,
         CHUNK_PRESERVE_RULES,

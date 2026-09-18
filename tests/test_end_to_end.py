@@ -8,22 +8,22 @@ from datetime import date
 
 import pytest
 
-from payroll.policy_update.change_management.changeset_builder import (
+from policy_update.change_management.changeset_builder import (
     build_changeset,
     draft_parameter_update_operations,
 )
-from payroll.policy_update.change_management.changeset_schema import (
+from policy_update.change_management.changeset_schema import (
     ChangeCategory,
     ChangeSetStatus,
     ReviewDecisionType,
     RiskLevel,
 )
-from payroll.policy_update.change_management.classifier import (
+from policy_update.change_management.classifier import (
     ClassifierContext,
     classify_policy_diff,
     validate_classified_change,
 )
-from payroll.policy_update.change_management.fixtures import (
+from policy_update.change_management.fixtures import (
     FakeCompletionClient,
     sample_ambiguous_diff,
     sample_editorial_diff,
@@ -31,8 +31,8 @@ from payroll.policy_update.change_management.fixtures import (
     sample_formula_change_diff,
     sample_parameter_change_diff,
 )
-from payroll.policy_update.change_management.state_machine import Actor, StateMachineError, transition
-from payroll.policy_update.change_management.validation import validate_changeset
+from policy_update.change_management.state_machine import Actor, StateMachineError, transition
+from policy_update.change_management.validation import validate_changeset
 
 
 def _classifier_context() -> ClassifierContext:

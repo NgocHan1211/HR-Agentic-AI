@@ -7,12 +7,12 @@ from datetime import date
 
 import pytest
 
-from payroll.policy_update.chunking.chunk_metadata import Chunk, HeadingContext
-from payroll.policy_update.parsers.base_parser import BlockType, Persistence, SourceLocation, SourceRef
-from payroll.rag.access_filter import AccessContext, PermissionLevel
-from payroll.rag.citation_validator import Citation, CitationIssue, CitationValidator
-from payroll.rag.models import RetrievalResult, RetrievedChunk
-from payroll.rag.rag_adapter import RAGAdapter
+from policy_update.chunking.chunk_metadata import Chunk, HeadingContext
+from policy_update.parsers.base_parser import BlockType, Persistence, SourceLocation, SourceRef
+from rag.access_filter import AccessContext, PermissionLevel
+from rag.citation_validator import Citation, CitationIssue, CitationValidator
+from rag.models import RetrievalResult, RetrievedChunk
+from rag.rag_adapter import RAGAdapter
 
 
 def _make_chunk(chunk_id: str, text: str, *, company: str | None, scope=None,

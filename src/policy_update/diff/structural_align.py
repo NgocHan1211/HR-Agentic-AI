@@ -6,7 +6,7 @@ from .models import ChangeType, Section, SectionDiff, TextOpType
 from .text_diff import diff_text, text_similarity
 
 try:
-    from ...config import DIFF_SECTION_RENAME_SIMILARITY_THRESHOLD, DIFF_MAX_FUZZY_MATCH_PRODUCT
+    from config import DIFF_SECTION_RENAME_SIMILARITY_THRESHOLD, DIFF_MAX_FUZZY_MATCH_PRODUCT
 except ImportError:
     from config import DIFF_SECTION_RENAME_SIMILARITY_THRESHOLD, DIFF_MAX_FUZZY_MATCH_PRODUCT
 

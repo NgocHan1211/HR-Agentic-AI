@@ -1,0 +1,15 @@
+# Streamlit payroll workflow
+streamlit
+pandas
+openpyxl
+pypdf
+python-docx
+openai
+
+# Policy-update review API
+fastapi
+sqlalchemy
+pydantic
+
+# Tests
+pytest

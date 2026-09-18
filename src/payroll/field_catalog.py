@@ -7,6 +7,7 @@ inventing a slightly different name for the same business concept.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 import re
 import unicodedata
 
@@ -118,3 +119,72 @@ def is_known_field_code(code: object | None, source: str | None = None) -> bool:
     canonical = canonical_field_code(code)
     field = _BY_ALIAS.get(canonical or "")
     return bool(field and (source is None or source in field.sources))
+
+
+def suggest_formula_column_mapping(
+    columns: list[object],
+    required_codes: set[str],
+    *,
+    source: str,
+    use_llm_fallback: bool | None = None,
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Match spreadsheet columns to a FormulaSpec input contract.
+
+    The returned mapping keeps the FormulaSpec's original ``field_code`` as
+    its key.  That is important: ``base_salary`` and ``basic_salary`` are
+    equivalent in the shared vocabulary, but the formula engine must receive
+    the exact code referenced by its variables.
+
+    Unknown company-specific fields still match when their normalized Excel
+    header equals the normalized FormulaSpec field code (for example, "Meal
+    Allowance" -> ``meal_allowance``).  A column is never used twice.
+    """
+    available = [str(column) for column in columns]
+    unused = set(range(len(available)))
+    mapping: dict[str, str] = {}
+    missing: list[str] = []
+
+    for field_code in sorted(required_codes):
+        expected = canonical_field_code(field_code) or normalize_field_label(field_code)
+        exact_name = normalize_field_label(field_code)
+        matches: list[tuple[int, int]] = []
+        for index, header in enumerate(available):
+            if index not in unused:
+                continue
+            inferred = canonical_field_code(suggested_field_code(header, source=source))
+            normalized_header = normalize_field_label(header)
+            if inferred == expected:
+                matches.append((2, index))
+            elif normalized_header == exact_name:
+                matches.append((1, index))
+        if not matches:
+            missing.append(field_code)
+            continue
+        # Prefer the catalog-aware result, then the leftmost matching column.
+        _, selected = max(matches, key=lambda item: (item[0], -item[1]))
+        mapping[field_code] = available[selected]
+        unused.remove(selected)
+
+    # The deterministic catalog is always the first choice. LLM fallback is
+    # opt-in because it is a network call with a cost and must not make a
+    # normal Excel import depend on an API key.
+    if missing and _llm_fallback_enabled(use_llm_fallback):
+        try:
+            from .lm_fallback_mapping import apply_llm_fallback
+
+            mapping, unresolved, _needs_review = apply_llm_fallback(
+                mapping, tuple(missing), available, source=source
+            )
+            missing = list(unresolved)
+        except Exception:
+            # Mapping remains usable if OpenRouter, the optional openai
+            # package, or the fallback response is unavailable.
+            pass
+
+    return mapping, tuple(missing)
+
+
+def _llm_fallback_enabled(value: bool | None) -> bool:
+    if value is not None:
+        return value
+    return os.environ.get("PAYROLL_MAPPING_LLM_FALLBACK", "").strip().lower() in {"1", "true", "yes", "on"}

@@ -1,7 +1,7 @@
 """Mock fixtures matching the Day-0 contract (mục 9: "Ngay ngày đầu cần publish mock
 contract... Mỗi người phát triển với fixture mock"). Use these until Person 1's real
 Diff Engine is wired end-to-end; `RetrievedEvidence` here is Person 1's REAL contract
-(`payroll.rag.rag_adapter.RetrievedEvidence`), not a Person-2-invented shape.
+(`rag.rag_adapter.RetrievedEvidence`), not a Person-2-invented shape.
 """
 
 from __future__ import annotations

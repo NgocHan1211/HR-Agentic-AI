@@ -9,13 +9,13 @@ from datetime import date
 from payroll.formula.formula_review import FormulaCandidateStore
 from payroll.formula.formula_schema import ReviewStatus
 from payroll.formula.formula_validator import ValidationContext
-from payroll.policy_update.change_management.changeset_schema import ChangeCategory, ChangeItem, ChangeSet
-from payroll.policy_update.change_management.fixtures import (
+from policy_update.change_management.changeset_schema import ChangeCategory, ChangeItem, ChangeSet
+from policy_update.change_management.fixtures import (
     FakeCompletionClient,
     sample_evidence_for,
     sample_formula_change_diff,
 )
-from payroll.policy_update.change_management.formula_adapter import (
+from policy_update.change_management.formula_adapter import (
     activate_formula_for_changeset,
     build_review_package,
     propose_formula_revision,

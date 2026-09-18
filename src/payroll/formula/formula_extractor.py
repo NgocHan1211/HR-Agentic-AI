@@ -296,7 +296,14 @@ def _sanitize_identifiers(payload: dict[str, Any]) -> dict[str, Any]:
     defined = {item["name"] for item in variables}
     outputs = {item["output_field"] for item in rules}
     builtins = {"prorate", "round_down", "tax_bracket_vn"}
-    referenced = set().union(*(_expression_names(item.get("expression")) for item in rules)) if rules else set()
+    # A rule can use an Excel input either in its calculated value or only in
+    # its condition.  The earlier implementation only scanned expressions,
+    # which left condition-only inputs (for example an abandonment-day count)
+    # undeclared and made FormulaSpec validation fail.
+    referenced = set()
+    for rule in rules:
+        referenced.update(_expression_names(rule.get("expression")))
+        referenced.update(_expression_names(rule.get("condition")))
     for name in sorted(referenced - defined - outputs - builtins):
         source = "employee" if "salary" in name or "wage" in name else "attendance"
         variables.append({"name": name, "source": source, "field_code": name,

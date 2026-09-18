@@ -20,8 +20,8 @@ from __future__ import annotations
 
 from datetime import date
 
-from ...rag.access_filter import AccessContext, PermissionLevel
-from ...rag.rag_adapter import RAGAdapter, RetrievedEvidence
+from rag.access_filter import AccessContext, PermissionLevel
+from rag.rag_adapter import RAGAdapter, RetrievedEvidence
 from .contracts import PolicyDiff
 
 # Placeholder — see module docstring. Do not treat as a final security decision.

@@ -8,15 +8,15 @@ from datetime import date
 import pytest
 from fastapi.testclient import TestClient
 
-from payroll.policy_update.change_management.changeset_schema import (
+from policy_update.change_management.changeset_schema import (
     ChangeCategory,
     ChangeItem,
     ChangeSet,
     ChangeSetStatus,
     RiskLevel,
 )
-from payroll.policy_update.change_management.db import init_db, make_engine, make_session_factory, session_scope
-from payroll.policy_update.change_management.repository import load_changeset, save_changeset
+from policy_update.change_management.db import init_db, make_engine, make_session_factory, session_scope
+from policy_update.change_management.repository import load_changeset, save_changeset
 
 
 @pytest.fixture()
@@ -72,7 +72,7 @@ def test_load_missing_changeset_returns_none(session_factory):
 
 @pytest.fixture()
 def api_client(monkeypatch, tmp_path):
-    from payroll.policy_update.change_management import db, review_api
+    from policy_update.change_management import db, review_api
 
     engine = make_engine(f"sqlite:///{tmp_path}/api_test.db")
     init_db(engine)
