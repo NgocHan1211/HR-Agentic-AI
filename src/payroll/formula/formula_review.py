@@ -97,5 +97,10 @@ def _ordered_rules(rules: tuple[FormulaRule, ...]) -> list[FormulaRule]:
 
 def _names(expression: str) -> set[str]:
     import ast
+
+    expression = expression.strip()
+    if not expression:
+        return set()
+
     tree = ast.parse(expression, mode="eval")
     return {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}

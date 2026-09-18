@@ -23,16 +23,48 @@ class CompletionClient(Protocol):
     def complete(self, *, system: str, user: str) -> str: ...
 
 
+# This is deliberately a small, shared contract rather than a list of fields
+# invented by each LLM response.  It covers the common Phase-1 payroll inputs;
+# customer-specific fields are added through the data dictionary, not guessed
+# from a display label in a PDF.
+_CANONICAL_PAYROLL_INPUTS = (
+    "employee_id, employee_type, job_role, base_rate, basic_salary, "
+    "scheduled_work_days, worked_days, unpaid_leave_days, paid_days, days_in_month, "
+    "internal_allowance_amount, productivity_allowance_amount, bhxh_rate, "
+    "salary_advance, annual_leave_days, night_shift_hours, "
+    "ot_day_normal_hours, ot_night_normal_hours, ot_day_rest_hours, "
+    "ot_night_rest_hours, ot_day_holiday_hours, ot_night_holiday_hours"
+)
+
+_CANONICAL_PAYROLL_OUTPUTS = (
+    "basic_salary, monthly_salary, internal_allowance, productivity_allowance, "
+    "overtime_pay, bhxh_fee, pit_amount, salary_advance, gross_income, "
+    "total_deductions, net_pay"
+)
+
+
 def extract_formula(document_text: str, company_id: str, evidence_locations: list[dict[str, Any]] | None = None,
                     *, llm_client: CompletionClient | None = None) -> FormulaCandidate:
     """Ask an LLM for a JSON FormulaSpec draft and preserve evidence for human review."""
     if not document_text.strip(): raise ValueError("document_text is required")
     client = llm_client or _client_from_environment()
-    system = ("You extract payroll formulas. Return only valid JSON with confidence (0..1), "
+    system = ("You extract payroll formulas from the supplied policy evidence. Return only valid JSON with confidence (0..1), "
               "calculation_basis, variables [{name,source,field_code?,value?,description?,category?,"
               "role?,ot_attributes?}], and rules [{output_field,expression,condition?,rounding?,section?,"
               "description?,category?,ot_attributes?}]. "
+              "Extract ONLY a calculation explicitly supported by the supplied evidence. Ignore hiring, workflow, "
+              "payment-process, and HR-administration text. Never infer a rate, a threshold, a job role, a "
+              "full-month branch, or a termination rule from general payroll knowledge. If the evidence does not "
+              "state enough to build a safe calculation, return an empty rules array and low confidence instead of guessing. "
               "Sources must be employee, attendance, rate_config, regulatory, or literal. "
+              "Use this canonical input-field contract whenever a concept matches it: "
+              f"{_CANONICAL_PAYROLL_INPUTS}. "
+              "Use these canonical result codes whenever a result matches them: "
+              f"{_CANONICAL_PAYROLL_OUTPUTS}. "
+              "Do not create aliases, numbered duplicates such as basic_salary_2/service_fee_2, or a new field name "
+              "merely because the PDF uses a different label. A PDF label that cannot be mapped confidently to the "
+              "contract must not be used in an executable rule; describe it in the nearest variable description as "
+              "'unmapped source label: ...' and lower confidence. "
               "Use only arithmetic and prorate, round_down, tax_bracket_vn; never calculate a salary. "
               "Every `name` and `output_field` MUST be a valid Python identifier: lowercase ASCII "
               "letters, digits, underscores only, must not start with a digit, no spaces or accents "
@@ -41,6 +73,11 @@ def extract_formula(document_text: str, company_id: str, evidence_locations: lis
               "integration code in English (e.g. `basic_salary`, `total_working_days`), never a Vietnamese display label. "
               "`expression`/`condition` must reference variables and prior output_fields by that exact "
               "identifier. "
+              "Every rule output_field must be unique. Every name referenced by an expression must be "
+              "declared in variables or be a previous rule output_field; never invent an undeclared name. "
+              "Create one rule per business result. Do not split one result into numbered branch rules; use one "
+              "well-defined rule only when its condition and all inputs are explicitly evidenced. Conditions must be "
+              "valid Python boolean expressions, never prose such as 'Luôn áp dụng'. "
               "`category` classifies the component using the shared salary-component menu: one of "
               "BASIC, ALLOWANCE, WORKDAY, BONUS, BHXH, PIT, DEDUCTION_OTHER, SALARY_OT. "
               "`role` says whether the field is a raw attendance count (`input_variable`, e.g. worked "
@@ -60,6 +97,63 @@ def extract_formula(document_text: str, company_id: str, evidence_locations: lis
         raw_response = client.complete(system=system, user=document_text)
     except (OSError, RuntimeError) as exc:
         raise FormulaExtractionError(f"LLM extraction request failed: {str(exc)[:500]}") from exc
+    return _candidate_from_response(raw_response, company_id, evidence_locations)
+
+
+def repair_formula(
+    document_text: str,
+    candidate: FormulaCandidate,
+    validation_errors: list[str] | tuple[str, ...],
+    evidence_locations: list[dict[str, Any]] | None = None,
+    *,
+    llm_client: CompletionClient | None = None,
+) -> FormulaCandidate:
+    """Ask the LLM once to repair a rejected draft using deterministic validator errors.
+
+    This does not activate or silently approve a formula.  The repaired candidate is
+    sent through the same validator and still requires human review in the UI.
+    """
+    client = llm_client or _client_from_environment()
+    draft = {
+        "confidence": candidate.confidence,
+        "calculation_basis": candidate.proposed_spec.calculation_basis,
+        "variables": [_variable_to_payload(item) for item in candidate.proposed_spec.variables],
+        "rules": [_rule_to_payload(item) for item in candidate.proposed_spec.rules],
+    }
+    system = (
+        "You repair a payroll FormulaSpec draft. Return ONLY one valid JSON object with confidence, "
+        "calculation_basis, variables, and rules. Do not explain. The validator errors are authoritative. "
+        "Keep only calculations explicitly supported by the policy excerpt. Remove guessed rules rather than "
+        "inventing assumptions. Use the canonical input fields when applicable: "
+        f"{_CANONICAL_PAYROLL_INPUTS}. Use canonical result codes when applicable: "
+        f"{_CANONICAL_PAYROLL_OUTPUTS}. Do not create numbered duplicate outputs such as *_2. "
+        "Each rule output_field must be unique. Every identifier referenced in an expression must be either "
+        "a declared variable, an earlier unique output_field, or one of: prorate, round_down, tax_bracket_vn. "
+        "Do not invent values or variables just to silence an error: remove an unsupported rule or use a "
+        "properly declared variable only when the policy supports it. Sources must be employee, attendance, "
+        "rate_config, regulatory, or literal."
+    )
+    user = json.dumps(
+        {
+            "validator_errors": list(validation_errors),
+            "draft_to_repair": draft,
+            "policy_excerpt": document_text[:12000],
+        },
+        ensure_ascii=False,
+        default=str,
+    )
+    try:
+        raw_response = client.complete(system=system, user=user)
+    except (OSError, RuntimeError) as exc:
+        raise FormulaExtractionError(f"LLM repair request failed: {str(exc)[:500]}") from exc
+    return _candidate_from_response(raw_response, candidate.company_id, evidence_locations or candidate.source_evidence)
+
+
+def _candidate_from_response(
+    raw_response: str,
+    company_id: str,
+    evidence_locations: list[dict[str, Any]] | None,
+) -> FormulaCandidate:
     try:
         payload = _parse_json_response(raw_response)
     except json.JSONDecodeError as exc:
@@ -78,6 +172,40 @@ def extract_formula(document_text: str, company_id: str, evidence_locations: lis
     return FormulaCandidate(candidate_id=payload.get("candidate_id", f"candidate-{uuid4().hex[:12]}"), company_id=company_id,
                             proposed_spec=spec, confidence=float(payload.get("confidence", 0.0)),
                             source_evidence=list(evidence_locations or []))
+
+
+def _variable_to_payload(variable: FormulaVariable) -> dict[str, Any]:
+    return {
+        "name": variable.name,
+        "source": variable.source,
+        "field_code": variable.field_code,
+        "value": variable.value,
+        "description": variable.description,
+        "category": variable.category.value if variable.category else None,
+        "role": variable.role.value if variable.role else None,
+        "ot_attributes": {
+            "shift_type": variable.ot_attributes.shift_type.value,
+            "day_type": variable.ot_attributes.day_type.value,
+            "rate": variable.ot_attributes.rate,
+        } if variable.ot_attributes else None,
+    }
+
+
+def _rule_to_payload(rule: FormulaRule) -> dict[str, Any]:
+    return {
+        "output_field": rule.output_field,
+        "expression": rule.expression,
+        "condition": rule.condition,
+        "rounding": rule.rounding,
+        "section": rule.section,
+        "description": rule.description,
+        "category": rule.category.value if rule.category else None,
+        "ot_attributes": {
+            "shift_type": rule.ot_attributes.shift_type.value,
+            "day_type": rule.ot_attributes.day_type.value,
+            "rate": rule.ot_attributes.rate,
+        } if rule.ot_attributes else None,
+    }
 
 
 _NON_IDENTIFIER_RE = re.compile(r"[^0-9a-zA-Z_]+")
@@ -136,6 +264,26 @@ def _canonical_field_code(raw_code: Any, source: str | None) -> Any:
     return _FIELD_CODE_ALIASES.get(normalized, normalized)
 
 
+_SOURCE_ALIASES = {
+    # Numbers explicitly written in a policy are constants, not a sixth data
+    # source.  Small models often call this source "policy" or "document".
+    "policy": "literal",
+    "document": "literal",
+    "policy_document": "literal",
+    "formula": "literal",
+    "constant": "literal",
+    "config": "rate_config",
+    "company_config": "rate_config",
+    "employee_data": "employee",
+    "timesheet": "attendance",
+}
+
+
+def _canonical_source(raw_source: Any) -> str:
+    source = str(raw_source or "literal").strip().lower().replace("-", "_").replace(" ", "_")
+    return _SOURCE_ALIASES.get(source, source)
+
+
 def _parse_category(raw: Any) -> ComponentCategory | None:
     if raw is None: return None
     try: return ComponentCategory(str(raw).strip().upper())
@@ -179,6 +327,8 @@ def _sanitize_identifiers(payload: dict[str, Any]) -> dict[str, Any]:
     e.g. proposing "Lương cơ bản" instead of "luong_co_ban"."""
     used_names: set[str] = set()
     rename_map: dict[str, str] = {}
+    raw_rules = [dict(item) for item in payload.get("rules", []) if isinstance(item, dict)]
+    raw_output_names = {str(item.get("output_field") or "") for item in raw_rules}
 
     def resolve(raw_name: str) -> str:
         raw_name = str(raw_name or "")
@@ -191,7 +341,18 @@ def _sanitize_identifiers(payload: dict[str, Any]) -> dict[str, Any]:
         rename_map[raw_name] = new_name
         return new_name
 
-    def apply_rename(text: str | None) -> str | None:
+    def apply_rename(text: Any) -> str | None:
+        # Some providers serialize an unconditional rule as JSON true.  In our
+        # formula contract an absent condition means "always apply", so turn it
+        # into None before the expression validator sees it.  Other non-string
+        # conditions are deliberately preserved as a readable invalid value;
+        # the validator will report them rather than crashing Streamlit.
+        if text is True:
+            return None
+        if text is None:
+            return None
+        if not isinstance(text, str):
+            return str(text)
         if not text or not rename_map:
             return text
         for old, new in sorted(rename_map.items(), key=lambda kv: len(kv[0]), reverse=True):
@@ -202,13 +363,29 @@ def _sanitize_identifiers(payload: dict[str, Any]) -> dict[str, Any]:
     variables = []
     for item in payload.get("variables", []):
         item = dict(item)
+        item["source"] = _canonical_source(item.get("source"))
+        # A common LLM failure is to declare the result of a rule as a null
+        # literal variable as well (for example `basic_salary`), then emit the
+        # actual result as `basic_salary_2`.  It is not an input and makes the
+        # review screen request an impossible sample value.  Discard only this
+        # narrow, unambiguous shadow-variable case.
+        if (item["source"] == "literal" and item.get("value") is None
+                and item.get("role") == "salary_component"
+                and str(item.get("name") or "") in raw_output_names):
+            continue
         item["name"] = resolve(item.get("name", ""))
         item["field_code"] = _canonical_field_code(item.get("field_code"), item.get("source"))
+        # `field_code` is the join key between FormulaSpec and either the
+        # Excel mapping or company rate configuration.  Free models sometimes
+        # omit it despite supplying a valid variable name.  The variable name
+        # is the only safe deterministic fallback; never make up a semantic
+        # alternative here.
+        if item["source"] in {"employee", "attendance", "rate_config", "regulatory"} and not item["field_code"]:
+            item["field_code"] = item["name"]
         variables.append(item)
 
     rules = []
-    for item in payload.get("rules", []):
-        item = dict(item)
+    for item in raw_rules:
         item["expression"] = apply_rename(item.get("expression"))
         item["condition"] = apply_rename(item.get("condition"))
         # Rename this rule's own output_field AFTER using it to rename expression/condition above,
@@ -228,7 +405,11 @@ def _variable_with_metadata(item: dict[str, Any]) -> FormulaVariable:
             category = ComponentCategory.SALARY_OT
     elif ot_attributes is not None and category is None:
         category = ComponentCategory.SALARY_OT
-    return FormulaVariable(name=item["name"], source=item["source"], field_code=item.get("field_code"),
+    if category is ComponentCategory.SALARY_OT and ot_attributes is None:
+        # Same defensive rule as FormulaRule: keep a malformed OT label
+        # reviewable instead of failing FormulaSpec construction outright.
+        category = None
+    return FormulaVariable(name=item["name"], source=_canonical_source(item.get("source")), field_code=item.get("field_code"),
                            value=item.get("value"), description=item.get("description", ""),
                            category=category, role=_parse_role(item.get("role")), ot_attributes=ot_attributes)
 
@@ -248,7 +429,19 @@ def _rule_with_metadata(item: dict[str, Any]) -> FormulaRule:
     # review screen can show it for a human to approve or reject.
     if category is ComponentCategory.SALARY_OT and ot_attributes is None:
         output = str(item.get("output_field", "")).lower()
-        if output.startswith(("tong_", "total_")):
+        # SALARY_OT must carry shift/day/rate.  A free LLM may attach this
+        # label to unrelated basic/allowance rules.  Preserve the rule for the
+        # later validator/repair loop rather than rejecting the entire draft
+        # before it can be reviewed.
+        if "basic" in output or "base" in output:
+            category = ComponentCategory.BASIC
+        elif "allowance" in output:
+            category = ComponentCategory.ALLOWANCE
+        elif "bhx" in output or "insurance" in output:
+            category = ComponentCategory.BHXH
+        elif "pit" in output or "tax" in output:
+            category = ComponentCategory.PIT
+        else:
             category = None
     return FormulaRule(**{key: value for key, value in item.items()
                           if key in {"output_field", "expression", "condition", "rounding", "section", "description"}},

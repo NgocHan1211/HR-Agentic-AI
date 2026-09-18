@@ -52,7 +52,7 @@ def validate_formula(candidate: FormulaCandidate, context: ValidationContext) ->
     rules_by_output = {rule.output_field: rule for rule in spec.rules}
     for rule in spec.rules:
         names = _validate_expression(rule.expression, rule.output_field, context.allowed_functions, errors)
-        if rule.condition:
+        if rule.condition is not None:
             names |= _validate_expression(rule.condition, rule.output_field, context.allowed_functions, errors)
         unknown = names - set(variables) - output_set
         if unknown: errors.append(f"rule {rule.output_field}: unknown variable(s) {sorted(unknown)}")
@@ -95,7 +95,13 @@ def _validate_net_consistency(spec: FormulaSpec, rules_by_output: dict[str, "obj
                         "NET = income - deductions cannot be computed from this spec alone")
 
 
-def _validate_expression(expression: str, rule_code: str, allowed_functions: Iterable[str], errors: list[str]) -> set[str]:
+def _validate_expression(expression: object, rule_code: str, allowed_functions: Iterable[str], errors: list[str]) -> set[str]:
+    # LLM JSON is untrusted.  Return a validation error for a boolean/list/etc.
+    # instead of passing it to ast.parse(), which raises TypeError and crashes
+    # the review screen.
+    if not isinstance(expression, str):
+        errors.append(f"rule {rule_code}: expression/condition must be a string, got {type(expression).__name__}")
+        return set()
     try: tree = ast.parse(expression, mode="eval")
     except SyntaxError:
         errors.append(f"rule {rule_code}: invalid expression syntax: {expression!r}"); return set()
