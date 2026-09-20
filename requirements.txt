@@ -13,3 +13,7 @@ pydantic
 
 # Tests
 pytest
+
+pdfplumber
+pytesseract
+Pillow
