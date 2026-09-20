@@ -28,13 +28,12 @@ BUILTIN_FUNCTIONS: dict[str, Callable[..., float]] = {
 _BINARY = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
            ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod}
 _COMPARE = {ast.Eq: operator.eq, ast.NotEq: operator.ne, ast.Lt: operator.lt,
-            ast.LtE: operator.le, ast.Gt: operator.gt, ast.GtE: operator.ge,
-            ast.In: operator.contains, ast.NotIn: lambda values, value: not operator.contains(values, value)}
+            ast.LtE: operator.le, ast.Gt: operator.gt, ast.GtE: operator.ge}
 
 
 def evaluate(expression: str, variables: Mapping[str, Any], *,
              functions: Mapping[str, Callable[..., float]] | None = None) -> float | bool:
-    """Evaluate numeric/boolean expressions and string comparisons safely."""
+    """Evaluate only numeric/boolean variables and whitelisted function calls."""
     if not isinstance(expression, str) or not expression.strip():
         raise ExpressionEvaluationError("expression must be a non-empty string")
     try:
@@ -53,18 +52,17 @@ class _Evaluator(ast.NodeVisitor):
     def generic_visit(self, node: ast.AST) -> Any:
         raise ExpressionEvaluationError(f"unsupported syntax: {type(node).__name__}")
 
-    def visit_Constant(self, node: ast.Constant) -> float | bool | str:
+    def visit_Constant(self, node: ast.Constant) -> float | bool:
         if isinstance(node.value, bool): return node.value
         if isinstance(node.value, Real): return float(node.value)
-        if isinstance(node.value, str): return node.value
-        raise ExpressionEvaluationError("only numeric, boolean, and string literals are allowed")
+        raise ExpressionEvaluationError("only numeric and boolean literals are allowed")
 
-    def visit_Name(self, node: ast.Name) -> float | bool | str:
+    def visit_Name(self, node: ast.Name) -> float | bool:
         if node.id not in self.variables:
             raise ExpressionEvaluationError(f"missing variable: {node.id}")
         value = self.variables[node.id]
-        if isinstance(value, (bool, Real, str)): return value
-        raise ExpressionEvaluationError(f"variable {node.id!r} must be numeric, boolean, or string")
+        if isinstance(value, bool) or isinstance(value, Real): return value
+        raise ExpressionEvaluationError(f"variable {node.id!r} must be numeric or boolean")
 
     def visit_UnaryOp(self, node: ast.UnaryOp) -> float | bool:
         value = self.visit(node.operand)
@@ -90,19 +88,9 @@ class _Evaluator(ast.NodeVisitor):
         left = self.visit(node.left)
         for op, comparator in zip(node.ops, node.comparators):
             operation, right = _COMPARE.get(type(op)), self.visit(comparator)
-            if operation is None: return self.generic_visit(op)
-            # ``operator.contains`` takes the collection before the candidate,
-            # whereas all other comparison operators take left then right.
-            matches = operation(right, left) if isinstance(op, (ast.In, ast.NotIn)) else operation(left, right)
-            if not matches: return False
+            if operation is None or not operation(left, right): return False
             left = right
         return True
-
-    def visit_List(self, node: ast.List) -> list[float | bool | str]:
-        return [self.visit(element) for element in node.elts]
-
-    def visit_Tuple(self, node: ast.Tuple) -> tuple[float | bool | str, ...]:
-        return tuple(self.visit(element) for element in node.elts)
 
     def visit_IfExp(self, node: ast.IfExp) -> float | bool:
         return self.visit(node.body if self.visit(node.test) else node.orelse)
