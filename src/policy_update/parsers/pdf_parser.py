@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
@@ -30,8 +31,6 @@ from config import (
     OCR_RENDER_DPI,
 )
 import pytesseract
-
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'  # Update this path to your Tesseract installation
 _RE_HEADING_PHAN = re.compile(r"^\s*Phần\s+[IVXLC0-9]+\b", re.IGNORECASE)
 _RE_HEADING_CHUONG = re.compile(r"^\s*Chương\s+[IVXLC0-9]+\b", re.IGNORECASE)
 _RE_HEADING_MUC = re.compile(r"^\s*Mục\s+[IVXLC0-9]+\b", re.IGNORECASE)
@@ -741,20 +740,23 @@ class PDFParser(BaseParser):
 
     @staticmethod
     def _configure_tesseract_command(pytesseract: Any) -> None:
-        """Use an explicit configuration or the standard Windows installation path.
-
-        This keeps OCR working when Streamlit is launched from a terminal whose
-        PATH was not refreshed after installing Tesseract.
-        """
+        """Select Tesseract without forcing a Windows-only executable path."""
         configured = os.getenv("TESSERACT_CMD")
-        candidates = [
-            Path(configured) if configured else None,
-            Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
-        ]
+        if configured:
+            pytesseract.pytesseract.tesseract_cmd = configured
+            return
+
+        candidates = []
+        if os.name == "nt":
+            candidates.append(Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"))
+
         for candidate in candidates:
-            if candidate is not None and candidate.is_file():
+            if candidate.is_file():
                 pytesseract.pytesseract.tesseract_cmd = str(candidate)
                 return
+
+        # Linux hosts such as Streamlit Cloud install the executable on PATH.
+        pytesseract.pytesseract.tesseract_cmd = shutil.which("tesseract") or "tesseract"
 
     @staticmethod
     def _tesseract_lang(language_hint: str | None) -> str:
