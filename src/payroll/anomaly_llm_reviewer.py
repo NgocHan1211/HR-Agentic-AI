@@ -21,7 +21,7 @@ class AnomalyExplainer(Protocol):
 def _redacted_payroll_context(payroll_result: PayrollResult, include_input_fields: tuple[str, ...] = ()) -> dict[str, Any]:
     """Build the payroll context sent to the LLM with input_snapshot stripped out by
     default. Pass include_input_fields to allow-list specific *non-identifying*
-    attendance/rate fields (e.g. 'worked_days', 'ot_day_normal_150_hours') if an explanation
+    attendance/rate fields (e.g. 'total_working_days', 'ot_hours') if an explanation
     genuinely needs them — never pass identity fields like CMND/CCCD/phone/address/name."""
     full = payroll_result.to_dict()
     context = {key: full[key] for key in _SAFE_PAYROLL_FIELDS if key in full}
