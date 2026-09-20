@@ -598,7 +598,7 @@ class OpenRouterCompletionClient:
     _DEFAULT_MODEL = "openrouter/free"
 
     def __init__(self, api_key: str, model: str | None = None, api_url: str | None = None,
-                 timeout_seconds: float = 60.0) -> None:
+                 timeout_seconds: float = 35.0) -> None:
         if not api_key:
             raise RuntimeError("OPENROUTER_API_KEY is required to call OpenRouter")
         self._api_key = api_key
@@ -667,7 +667,7 @@ def _client_from_environment() -> CompletionClient:
             api_key=openrouter_key,
             model=os.environ.get("OPENROUTER_MODEL"),
             api_url=os.environ.get("OPENROUTER_API_URL"),
-            timeout_seconds=float(os.environ.get("OPENROUTER_TIMEOUT_SECONDS", "60")),
+            timeout_seconds=float(os.environ.get("OPENROUTER_TIMEOUT_SECONDS", "35")),
         )
 
     api_key = os.environ.get("GEMMA_API_KEY")

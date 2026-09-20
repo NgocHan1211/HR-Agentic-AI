@@ -296,10 +296,11 @@ policy_file = st.file_uploader("Upload PDF chính sách", type=["pdf"])
 
 if policy_file and st.button("Đọc PDF và tạo bảng công thức", type="primary"):
     try:
-        text, warnings, evidence = parse_policy(policy_file)
-        if not text.strip():
-            raise ValueError("Không đọc được văn bản từ PDF. Với PDF scan, hãy kiểm tra OCR.")
-        set_formula_candidate(extract_formula(text, company_id, evidence))
+        with st.spinner("Đang đọc PDF và gọi AI tạo FormulaSpec..."):
+            text, warnings, evidence = parse_policy(policy_file)
+            if not text.strip():
+                raise ValueError("Không đọc được văn bản từ PDF. Với PDF scan, hãy kiểm tra OCR.")
+            set_formula_candidate(extract_formula(text, company_id, evidence))
         st.session_state.policy_text = text
         st.session_state.policy_evidence = evidence
         st.session_state.formula_feedback = []
