@@ -15,7 +15,7 @@ from .canonical_fields import canonical_field_code
 # These are calculated from mapped attendance counters, never selected from a
 # spreadsheet column.  Keep the list public so the mapping UI can omit them
 # from its required-column contract.
-DERIVED_ATTENDANCE_FIELD_CODES = frozenset({"is_full_month", "overtime_hours"})
+DERIVED_ATTENDANCE_FIELD_CODES = frozenset({"is_full_month", "is_partial_month", "overtime_hours"})
 
 
 @dataclass(frozen=True)
@@ -281,10 +281,16 @@ def _add_derived_attendance_fields(attributes: dict[str, Any]) -> None:
     if overtime_components and "overtime_hours" not in attributes:
         attributes["overtime_hours"] = float(sum(overtime_components))
 
-    scheduled = _first_numeric(attributes, "scheduled_working_days", "standard_working_days")
-    paid_days = _first_numeric(attributes, "days_with_salary", "actual_paid_day")
-    if scheduled is not None and paid_days is not None and "is_full_month" not in attributes:
-        attributes["is_full_month"] = paid_days >= scheduled
+    # Normal ingestion has already canonicalized these names.  Retain the
+    # legacy spellings too for callers that construct AttendanceRecord data
+    # directly rather than going through a sheet mapping.
+    scheduled = _first_numeric(attributes, "scheduled_work_days", "scheduled_working_days", "standard_working_days")
+    paid_days = _first_numeric(attributes, "paid_days", "days_with_salary", "actual_paid_day")
+    if scheduled is not None and paid_days is not None:
+        if "is_full_month" not in attributes:
+            attributes["is_full_month"] = paid_days >= scheduled
+        if "is_partial_month" not in attributes:
+            attributes["is_partial_month"] = paid_days < scheduled
 
 
 def _is_ot_component(field_code: str) -> bool:

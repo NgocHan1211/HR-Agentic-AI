@@ -28,7 +28,7 @@ _ALLOWED_NODES = {ast.Expression, ast.BinOp, ast.UnaryOp, ast.BoolOp, ast.Compar
                   ast.IfExp, ast.Call, ast.Name, ast.Load, ast.Constant, ast.Add,
                   ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.UAdd,
                   ast.USub, ast.Not, ast.And, ast.Or, ast.Eq, ast.NotEq, ast.Lt,
-                  ast.LtE, ast.Gt, ast.GtE}
+                  ast.LtE, ast.Gt, ast.GtE, ast.In, ast.NotIn, ast.List, ast.Tuple}
 
 
 def validate_formula(candidate: FormulaCandidate, context: ValidationContext) -> ValidationResult:

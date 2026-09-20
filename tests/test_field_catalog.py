@@ -10,6 +10,7 @@ def test_header_and_formula_synonyms_resolve_to_one_contract() -> None:
     assert canonical_field_code("base_salary") == "basic_salary"
     assert canonical_field_code("monthly_salary") == "basic_salary"
     assert suggested_field_code("Lương cơ bản (VND)", source="employee") == "basic_salary"
+    assert suggested_field_code("Trạng thái làm việc", source="employee") == "employment_status"
 
 
 def test_formula_extractor_uses_the_same_shared_catalog() -> None:

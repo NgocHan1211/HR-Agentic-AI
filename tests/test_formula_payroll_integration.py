@@ -13,6 +13,7 @@ from payroll.formula import (
     ValidationContext,
     activate_formula_version,
     review_formula,
+    validate_formula,
 )
 from payroll.ingestion import AttendanceRecord, CompanyConfig, EmployeeMaster
 from payroll.formula.formula_extractor import _normalize_expression_syntax
@@ -37,6 +38,28 @@ def test_expression_supports_string_conditions() -> None:
     assert evaluate(expression, {"service_type": "internal"}) == 500000
 
 
+def test_expression_supports_membership_conditions() -> None:
+    expression = "1000000 if employee_type in ['official', 'probation'] else 0"
+    assert evaluate(expression, {"employee_type": "official"}) == 1_000_000
+    assert evaluate(expression, {"employee_type": "contractor"}) == 0
+
+
+def test_validator_accepts_membership_condition_with_literal_list() -> None:
+    spec = FormulaSpec(
+        formula_id="membership-test",
+        company_id="test-company",
+        calculation_basis="monthly",
+        variables=(FormulaVariable("employee_type", "employee", field_code="employee_type"),),
+        rules=(FormulaRule("basic_salary", "0", condition="employee_type in ['official', 'probation']"),),
+    )
+    result = validate_formula(
+        FormulaCandidate("candidate-membership", "test-company", spec, confidence=1.0),
+        ValidationContext(frozenset({"employee"}), frozenset({"basic_salary"})),
+    )
+
+    assert result.passed
+
+
 def test_formula_extractor_normalizes_boolean_literals_and_omits_net_rule() -> None:
     payload = _sanitize_identifiers({
         "variables": [{"name": "is_insured", "source": "employee", "field_code": "is_insured"}],
@@ -47,6 +70,33 @@ def test_formula_extractor_normalizes_boolean_literals_and_omits_net_rule() -> N
     })
     assert payload["rules"] == [{"output_field": "insurance_fee", "expression": "100 if is_insured == True else 0",
                                   "condition": None, "rounding": None}]
+
+
+def test_formula_extractor_normalizes_canonical_inputs_and_boolean_conditions() -> None:
+    payload = _sanitize_identifiers({
+        "variables": [
+            {"name": "days_with_pay", "source": "attendance", "field_code": "days_with_pay"},
+            {"name": "is_partial_month", "source": "attendance", "field_code": "is_partial_month"},
+            {"name": "is_laid_off", "source": "employee", "field_code": "is_laid_off"},
+            {"name": "service_fee_2_rate", "source": "attendance", "field_code": "service_fee_2_rate"},
+        ],
+        "rules": [{
+            "output_field": "service_fee",
+            "expression": "days_with_pay * service_fee_2_rate",
+            "condition": "is_partial_month == false or is_laid_off == true",
+        }],
+    })
+
+    variables = {item["name"]: item for item in payload["variables"]}
+    assert variables["paid_days"]["field_code"] == "paid_days"
+    assert variables["is_partial_month"]["field_code"] == "is_partial_month"
+    assert variables["is_laid_off"]["field_code"] == "is_laid_off"
+    assert variables["service_fee_2_rate"] == {
+        "name": "service_fee_2_rate", "source": "rate_config", "field_code": "service_fee_rate"
+    }
+    assert "true" not in variables
+    assert "false" not in variables
+    assert payload["rules"][0]["condition"] == "is_partial_month == False or is_laid_off == True"
 
 
 def test_formula_extractor_makes_repeated_output_fields_unique() -> None:

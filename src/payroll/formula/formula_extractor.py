@@ -288,7 +288,10 @@ def _expression_names(expression: str | None) -> set[str]:
         tree = ast.parse(expression, mode="eval")
     except SyntaxError:
         return set()
-    return {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    # ``True`` and ``False`` are Names in Python's AST on some supported
+    # versions.  They are literals, never data-contract inputs.
+    return {node.id for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and node.id not in {"True", "False"}}
 
 
 def _parse_category(raw: Any) -> ComponentCategory | None:
@@ -365,6 +368,13 @@ def _sanitize_identifiers(payload: dict[str, Any]) -> dict[str, Any]:
         raw_name = item.get("name", "")
         _normalize_variable_source(item)
         item["field_code"] = _canonical_field_code(item.get("field_code"), item.get("source"))
+        # A service fee is a company-level rate.  Small models can emit a
+        # numbered duplicate (``service_fee_2_rate``) and incorrectly attach
+        # it to attendance; keep the variable name for expression references,
+        # but resolve it from one stable configuration key.
+        if item.get("field_code") == "service_fee_2_rate":
+            item["source"] = "rate_config"
+            item["field_code"] = "service_fee_rate"
         field_code = item.get("field_code")
         forced_name = (
             field_code
@@ -381,7 +391,7 @@ def _sanitize_identifiers(payload: dict[str, Any]) -> dict[str, Any]:
     for item in payload.get("rules", []):
         item = dict(item)
         item["expression"] = _normalize_expression_syntax(apply_rename(item.get("expression")))
-        item["condition"] = _expression_or_none(apply_rename(item.get("condition")))
+        item["condition"] = _expression_or_none(_normalize_expression_syntax(apply_rename(item.get("condition"))))
         item["rounding"] = _normalize_rounding(item.get("rounding"))
         # Rename this rule's own output_field AFTER using it to rename expression/condition above,
         # so later rules that reference it (by its original name) still get rewritten correctly.
@@ -412,8 +422,13 @@ def _sanitize_identifiers(payload: dict[str, Any]) -> dict[str, Any]:
         referenced.update(_expression_names(rule.get("expression")))
         referenced.update(_expression_names(rule.get("condition")))
     for name in sorted(referenced - defined - outputs - builtins):
-        source = "employee" if "salary" in name or "wage" in name else "attendance"
-        variables.append({"name": name, "source": source, "field_code": name,
+        is_service_fee_rate = name == "service_fee_2_rate"
+        source = "rate_config" if is_service_fee_rate else (
+            "employee" if name == "is_laid_off" or "salary" in name or "wage" in name else "attendance"
+        )
+        field_code = "service_fee_rate" if is_service_fee_rate else _canonical_field_code(name, source)
+        variables.append({"name": name, "source": source,
+                          "field_code": field_code,
                           "description": "Input inferred from a formula expression; HR must verify the mapping."})
 
     return {**payload, "variables": variables, "rules": rules}

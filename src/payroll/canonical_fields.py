@@ -12,14 +12,17 @@ from typing import Final
 
 
 EMPLOYEE_FIELDS: Final[frozenset[str]] = frozenset({
-    "employee_id", "employee_type", "job_role", "base_rate", "basic_salary",
+    "employee_id", "employee_type", "employment_status", "job_role", "base_rate", "basic_salary",
     "internal_allowance_amount", "productivity_allowance_amount", "bhxh_rate",
-    "salary_advance",
+    "salary_advance", "is_laid_off",
 })
 
 ATTENDANCE_FIELDS: Final[frozenset[str]] = frozenset({
     "scheduled_work_days", "worked_days", "unpaid_leave_days", "paid_days",
     "days_in_month", "annual_leave_days", "maternity_leave_days",
+    # These are derived from paid and scheduled work days during attendance
+    # normalization, rather than mapped from a tenant's worksheet column.
+    "is_full_month", "is_partial_month",
     "night_shift_hours", "ot_day_normal_150_hours", "ot_night_normal_150_hours",
     "ot_day_rest_200_hours", "ot_night_rest_200_hours", "ot_day_holiday_300_hours",
     "ot_night_holiday_300_hours",
@@ -53,6 +56,10 @@ FIELD_CODE_ALIASES: Final[dict[str, str]] = {
     "standard_days": "scheduled_work_days",
     "ngay_cong_chuan": "scheduled_work_days",
     "cong_chuan": "scheduled_work_days",
+    "days_with_pay": "paid_days",
+    "days_with_salary": "paid_days",
+    "actual_paid_day": "paid_days",
+    "paid_working_days": "paid_days",
     "tang_ca": "ot_day_normal_150_hours",
     "gio_tang_ca": "ot_day_normal_150_hours",
     "ot": "ot_day_normal_150_hours",

@@ -28,7 +28,8 @@ BUILTIN_FUNCTIONS: dict[str, Callable[..., float]] = {
 _BINARY = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
            ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod}
 _COMPARE = {ast.Eq: operator.eq, ast.NotEq: operator.ne, ast.Lt: operator.lt,
-            ast.LtE: operator.le, ast.Gt: operator.gt, ast.GtE: operator.ge}
+            ast.LtE: operator.le, ast.Gt: operator.gt, ast.GtE: operator.ge,
+            ast.In: operator.contains, ast.NotIn: lambda values, value: not operator.contains(values, value)}
 
 
 def evaluate(expression: str, variables: Mapping[str, Any], *,
@@ -89,9 +90,19 @@ class _Evaluator(ast.NodeVisitor):
         left = self.visit(node.left)
         for op, comparator in zip(node.ops, node.comparators):
             operation, right = _COMPARE.get(type(op)), self.visit(comparator)
-            if operation is None or not operation(left, right): return False
+            if operation is None: return self.generic_visit(op)
+            # ``operator.contains`` takes the collection before the candidate,
+            # whereas all other comparison operators take left then right.
+            matches = operation(right, left) if isinstance(op, (ast.In, ast.NotIn)) else operation(left, right)
+            if not matches: return False
             left = right
         return True
+
+    def visit_List(self, node: ast.List) -> list[float | bool | str]:
+        return [self.visit(element) for element in node.elts]
+
+    def visit_Tuple(self, node: ast.Tuple) -> tuple[float | bool | str, ...]:
+        return tuple(self.visit(element) for element in node.elts)
 
     def visit_IfExp(self, node: ast.IfExp) -> float | bool:
         return self.visit(node.body if self.visit(node.test) else node.orelse)

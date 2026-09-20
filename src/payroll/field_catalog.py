@@ -33,6 +33,8 @@ def _field(code: str, sources: tuple[str, ...], *aliases: str) -> FieldDefinitio
 # Add company-specific fields here instead of adding another one-off heuristic
 # to app.py or another special case to the LLM extractor.
 INPUT_FIELD_CATALOG: tuple[FieldDefinition, ...] = (
+    _field("employment_status", ("employee",), "employment_status", "employment status",
+           "employee_status", "trang thai lam viec", "tinh trang lam viec"),
     _field("position", ("employee",), "position", "job_title", "job title", "vtcv",
            "vi tri cong viec", "chuc danh", "cong viec"),
     _field("basic_salary", ("employee",), "basic_salary", "base_salary", "monthly_salary", "basic",

@@ -20,6 +20,7 @@ from payroll.field_catalog import (
     suggested_field_code,
 )
 from payroll.formula import FormulaExtractionError, ValidationContext, extract_formula, formula_to_engine_dict, validate_formula
+from payroll.formula.direct_editor import DirectFormulaEditError, apply_direct_formula_edits
 from payroll.ingestion import SheetMappingSpec, normalize_attendance, normalize_salary_schema, read_payroll_sheet, validate_ingested_data
 from policy_update.parsers.base_parser import DocumentRole, ParseRequest, Persistence, SourceRef
 from policy_update.parsers.parser_factory import ParserFactory
@@ -190,6 +191,55 @@ def formula_input_table(candidate: Any) -> pd.DataFrame:
     )
 
 
+def editable_variable_table(candidate: Any) -> pd.DataFrame:
+    """Build the HR-editable view of all formula inputs and fixed parameters."""
+    return pd.DataFrame(
+        [
+            {
+                "name": variable.name,
+                "source": variable.source,
+                "field_code": variable.field_code or "",
+                "value": variable.value,
+                "description": variable.description,
+            }
+            for variable in candidate.proposed_spec.variables
+        ],
+        columns=["name", "source", "field_code", "value", "description"],
+    )
+
+
+def editable_rule_table(candidate: Any) -> pd.DataFrame:
+    """Build the HR-editable view of formula rules without exposing model internals."""
+    return pd.DataFrame(
+        [
+            {
+                "output_field": rule.output_field,
+                "expression": rule.expression,
+                "condition": rule.condition or "",
+                "rounding": rule.rounding or "",
+                "section": rule.section or "",
+                "description": rule.description,
+            }
+            for rule in candidate.proposed_spec.rules
+        ],
+        columns=["output_field", "expression", "condition", "rounding", "section", "description"],
+    )
+
+
+def editor_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    """Turn Streamlit/Pandas empty cells into plain None values for the domain layer."""
+    records: list[dict[str, Any]] = []
+    for row in frame.to_dict("records"):
+        cleaned: dict[str, Any] = {}
+        for key, value in row.items():
+            try:
+                cleaned[key] = None if bool(pd.isna(value)) else value
+            except (TypeError, ValueError):
+                cleaned[key] = value
+        records.append(cleaned)
+    return records
+
+
 def prepare_formula_for_excel(formula: dict[str, Any]) -> dict[str, Any]:
     """Adapt policy/config values to the PDF + one-Excel-file HR workflow.
 
@@ -229,6 +279,14 @@ if "policy_evidence" not in st.session_state:
     st.session_state.policy_evidence = []
 if "formula_feedback" not in st.session_state:
     st.session_state.formula_feedback = []
+if "formula_editor_revision" not in st.session_state:
+    st.session_state.formula_editor_revision = 0
+
+
+def set_formula_candidate(candidate: Any) -> None:
+    """Replace the candidate and reset data-editor widget state on the next run."""
+    st.session_state.formula_candidate = candidate
+    st.session_state.formula_editor_revision += 1
 
 company_id = st.text_input("Mã công ty", value="UPLOAD")
 period = st.text_input("Kỳ lương", value="2025-05")
@@ -241,7 +299,7 @@ if policy_file and st.button("Đọc PDF và tạo bảng công thức", type="p
         text, warnings, evidence = parse_policy(policy_file)
         if not text.strip():
             raise ValueError("Không đọc được văn bản từ PDF. Với PDF scan, hãy kiểm tra OCR.")
-        st.session_state.formula_candidate = extract_formula(text, company_id, evidence)
+        set_formula_candidate(extract_formula(text, company_id, evidence))
         st.session_state.policy_text = text
         st.session_state.policy_evidence = evidence
         st.session_state.formula_feedback = []
@@ -270,6 +328,87 @@ st.dataframe(display_dataframe(formula_table(candidate)), hide_index=True, use_c
 st.caption("Bảng này cho biết rõ biến nào cần cột Excel, biến nào là hằng số lấy từ PDF.")
 st.dataframe(display_dataframe(formula_input_table(candidate)), hide_index=True, use_container_width=True)
 
+with st.expander("Chỉnh trực tiếp công thức và hằng số", expanded=True):
+    st.caption(
+        "Nhập trực tiếp số ngày chuẩn, rate_config, tỷ lệ bảo hiểm…; không cần gửi "
+        "feedback cho AI. Có thể thêm/xóa dòng bằng nút ở cuối mỗi bảng. "
+        "Sau khi áp dụng, hệ thống sẽ kiểm tra công thức trước khi cho tính lương."
+    )
+    editor_key = f"{candidate.candidate_id}_{st.session_state.formula_editor_revision}"
+    edited_variables = st.data_editor(
+        editable_variable_table(candidate),
+        key=f"formula_variables_{editor_key}",
+        num_rows="dynamic",
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "name": st.column_config.TextColumn("Tên biến", required=True),
+            "source": st.column_config.SelectboxColumn(
+                "Nguồn", required=True,
+                options=["employee", "attendance", "rate_config", "regulatory", "literal"],
+            ),
+            "field_code": st.column_config.TextColumn("Mã dữ liệu / cấu hình"),
+            "value": st.column_config.NumberColumn("Giá trị cố định", format="%.6f"),
+            "description": st.column_config.TextColumn("Ghi chú"),
+        },
+    )
+    st.caption(
+        "Để dùng một giá trị áp dụng chung, chọn `literal` hoặc giữ `rate_config`/`regulatory` "
+        "và điền Giá trị cố định. Nếu điền Giá trị cố định cho biến đang lấy từ Excel, "
+        "hệ thống sẽ tự chuyển biến đó thành hằng số. Để trống để tiếp tục lấy từ Excel."
+    )
+    variables_to_delete = st.multiselect(
+        "Xóa biến đã chọn",
+        options=[str(row["name"]) for row in editor_records(edited_variables) if row.get("name")],
+        placeholder="Chọn một hoặc nhiều biến cần xóa",
+        key=f"delete_variables_{editor_key}",
+        help="Các biến được chọn sẽ bị xóa khi bấm “Áp dụng thay đổi trực tiếp” bên dưới.",
+    )
+    edited_rules = st.data_editor(
+        editable_rule_table(candidate),
+        key=f"formula_rules_{editor_key}",
+        num_rows="dynamic",
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "output_field": st.column_config.TextColumn("Mã khoản tính", required=True),
+            "expression": st.column_config.TextColumn("Công thức", required=True, width="large"),
+            "condition": st.column_config.TextColumn("Điều kiện"),
+            "rounding": st.column_config.TextColumn("Làm tròn, ví dụ round_down_1000"),
+            "section": st.column_config.SelectboxColumn(
+                "Nhóm", options=["", "line_items", "deductions", "employer_cost"],
+            ),
+            "description": st.column_config.TextColumn("Ghi chú"),
+        },
+    )
+    rules_to_delete = st.multiselect(
+        "Xóa khoản tính đã chọn",
+        options=[str(row["output_field"]) for row in editor_records(edited_rules) if row.get("output_field")],
+        placeholder="Chọn một hoặc nhiều khoản tính cần xóa",
+        key=f"delete_rules_{editor_key}",
+        help="Các khoản được chọn sẽ bị xóa khi bấm “Áp dụng thay đổi trực tiếp” bên dưới.",
+    )
+    if st.button("Áp dụng thay đổi trực tiếp", type="primary", key=f"apply_formula_{editor_key}"):
+        try:
+            variable_rows = [
+                row for row in editor_records(edited_variables)
+                if row.get("name") not in variables_to_delete
+            ]
+            rule_rows = [
+                row for row in editor_records(edited_rules)
+                if row.get("output_field") not in rules_to_delete
+            ]
+            set_formula_candidate(
+                apply_direct_formula_edits(
+                    candidate,
+                    variable_rows,
+                    rule_rows,
+                )
+            )
+            st.rerun()
+        except (DirectFormulaEditError, ValueError) as exc:
+            st.error(f"Không thể áp dụng thay đổi: {exc}")
+
 with st.expander("Thiếu cột hoặc cần sửa công thức?", expanded=False):
     st.caption("Ví dụ: “Bổ sung phụ cấp xăng xe từ cột Phụ cấp xăng xe của Excel” hoặc “OT ngày lễ là 300%”.")
     feedback = st.text_area("Yêu cầu của HR", key="formula_feedback_text")
@@ -285,11 +424,11 @@ with st.expander("Thiếu cột hoặc cần sửa công thức?", expanded=Fals
                     "\n\nYÊU CẦU BỔ SUNG/SỬA TỪ HR (phải phản ánh vào FormulaSpec):\n"
                     + "\n".join(f"- {item}" for item in st.session_state.formula_feedback)
                 )
-                st.session_state.formula_candidate = extract_formula(
+                set_formula_candidate(extract_formula(
                     st.session_state.policy_text + instruction,
                     company_id,
                     st.session_state.policy_evidence,
-                )
+                ))
                 st.rerun()
             except (FormulaExtractionError, ValueError) as exc:
                 st.error(f"Không thể cập nhật công thức: {exc}")
@@ -433,11 +572,11 @@ if missing:
                 + available_columns
             )
             try:
-                st.session_state.formula_candidate = extract_formula(
+                set_formula_candidate(extract_formula(
                     st.session_state.policy_text + instruction,
                     company_id,
                     st.session_state.policy_evidence,
-                )
+                ))
                 st.success("Đã tạo lại công thức theo các cột Excel hiện có.")
                 st.rerun()
             except (FormulaExtractionError, ValueError) as exc:
