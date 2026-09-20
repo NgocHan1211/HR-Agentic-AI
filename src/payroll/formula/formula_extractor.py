@@ -7,11 +7,17 @@ import random
 import re
 import time
 import unicodedata
+import ast
 import urllib.error
 import urllib.request
 from typing import Any, Protocol
 from uuid import uuid4
 
+from ..canonical_fields import (
+    canonical_field_code,
+    canonical_input_field_contract,
+    canonical_output_field_contract,
+)
 from .formula_schema import (ComponentCategory, ComponentRole, DayType, FormulaCandidate, FormulaRule,
                              FormulaSpec, FormulaVariable, OTAttributes, ShiftType)
 
@@ -23,61 +29,38 @@ class CompletionClient(Protocol):
     def complete(self, *, system: str, user: str) -> str: ...
 
 
-# This is deliberately a small, shared contract rather than a list of fields
-# invented by each LLM response.  It covers the common Phase-1 payroll inputs;
-# customer-specific fields are added through the data dictionary, not guessed
-# from a display label in a PDF.
-_CANONICAL_PAYROLL_INPUTS = (
-    "employee_id, employee_type, job_role, base_rate, basic_salary, "
-    "scheduled_work_days, worked_days, unpaid_leave_days, paid_days, days_in_month, "
-    "internal_allowance_amount, productivity_allowance_amount, bhxh_rate, "
-    "salary_advance, annual_leave_days, night_shift_hours, "
-    "ot_day_normal_hours, ot_night_normal_hours, ot_day_rest_hours, "
-    "ot_night_rest_hours, ot_day_holiday_hours, ot_night_holiday_hours"
-)
-
-_CANONICAL_PAYROLL_OUTPUTS = (
-    "basic_salary, monthly_salary, internal_allowance, productivity_allowance, "
-    "overtime_pay, bhxh_fee, pit_amount, salary_advance, gross_income, "
-    "total_deductions, net_pay"
-)
-
-
 def extract_formula(document_text: str, company_id: str, evidence_locations: list[dict[str, Any]] | None = None,
                     *, llm_client: CompletionClient | None = None) -> FormulaCandidate:
     """Ask an LLM for a JSON FormulaSpec draft and preserve evidence for human review."""
     if not document_text.strip(): raise ValueError("document_text is required")
     client = llm_client or _client_from_environment()
-    system = ("You extract payroll formulas from the supplied policy evidence. Return only valid JSON with confidence (0..1), "
+    system = ("You extract payroll formulas. Return only valid JSON with confidence (0..1), "
               "calculation_basis, variables [{name,source,field_code?,value?,description?,category?,"
               "role?,ot_attributes?}], and rules [{output_field,expression,condition?,rounding?,section?,"
               "description?,category?,ot_attributes?}]. "
-              "Extract ONLY a calculation explicitly supported by the supplied evidence. Ignore hiring, workflow, "
-              "payment-process, and HR-administration text. Never infer a rate, a threshold, a job role, a "
-              "full-month branch, or a termination rule from general payroll knowledge. If the evidence does not "
-              "state enough to build a safe calculation, return an empty rules array and low confidence instead of guessing. "
               "Sources must be employee, attendance, rate_config, regulatory, or literal. "
               "Use this canonical input-field contract whenever a concept matches it: "
-              f"{_CANONICAL_PAYROLL_INPUTS}. "
+              f"{canonical_input_field_contract()}. "
+              "Declare an employee or attendance input only when the policy explicitly requires it for an executable "
+              "rule. Do not add a generic payroll-template input (for example days_in_month, paid_days, "
+              "unpaid_leave_days, or allowance rates) merely because it is common in other payroll schemes. "
               "Use these canonical result codes whenever a result matches them: "
-              f"{_CANONICAL_PAYROLL_OUTPUTS}. "
+              f"{canonical_output_field_contract()}. "
               "Do not create aliases, numbered duplicates such as basic_salary_2/service_fee_2, or a new field name "
               "merely because the PDF uses a different label. A PDF label that cannot be mapped confidently to the "
               "contract must not be used in an executable rule; describe it in the nearest variable description as "
               "'unmapped source label: ...' and lower confidence. "
               "Use only arithmetic and prorate, round_down, tax_bracket_vn; never calculate a salary. "
+              "Use only arithmetic and prorate, round_down, tax_bracket_vn; for rule rounding use exactly "
+              "'round' or 'round_down_<positive_unit>' such as 'round_down_1000', never bare 'round_down'; "
+              "never calculate a salary. "
               "Every `name` and `output_field` MUST be a valid Python identifier: lowercase ASCII "
               "letters, digits, underscores only, must not start with a digit, no spaces or accents "
               "(e.g. use 'luong_co_ban', not 'Lương cơ bản' or 'luong-co-ban'). "
               "For `employee` and `attendance` variables, `field_code` is a lowercase ASCII snake_case "
-              "integration code in English (e.g. `basic_salary`, `total_working_days`), never a Vietnamese display label. "
+              "integration code in English (e.g. `basic_salary`, `worked_days`), never a Vietnamese display label. "
               "`expression`/`condition` must reference variables and prior output_fields by that exact "
               "identifier. "
-              "Every rule output_field must be unique. Every name referenced by an expression must be "
-              "declared in variables or be a previous rule output_field; never invent an undeclared name. "
-              "Create one rule per business result. Do not split one result into numbered branch rules; use one "
-              "well-defined rule only when its condition and all inputs are explicitly evidenced. Conditions must be "
-              "valid Python boolean expressions, never prose such as 'Luôn áp dụng'. "
               "`category` classifies the component using the shared salary-component menu: one of "
               "BASIC, ALLOWANCE, WORKDAY, BONUS, BHXH, PIT, DEDUCTION_OTHER, SALARY_OT. "
               "`role` says whether the field is a raw attendance count (`input_variable`, e.g. worked "
@@ -87,12 +70,16 @@ def extract_formula(document_text: str, company_id: str, evidence_locations: lis
               "rules whose category is BASIC, ALLOWANCE, BONUS, or SALARY_OT MUST use section='line_items'. "
               "NET pay is always tong thu nhap (line_items) minus tong khau tru (deductions); never fold "
               "a deduction into a line_items rule or vice versa. "
-              "For overtime, never invent a separate field per rate (e.g. `ot_hours_150`, "
-              "`ot_holiday_night_350`). Instead set category='SALARY_OT' and give "
-              "`ot_attributes: {shift_type: 'Day'|'Night', day_type: 'Normal'|'Rest'|'Holiday', "
-              "rate: 1.5|2.0|2.7|3.0|3.9}` so every overtime variant is described the same way. "
-              "Use a SALARY_OT category only for one concrete OT variant with ot_attributes; "
-              "do not label aggregate totals such as total_overtime as SALARY_OT.")
+              "For overtime in a monthly attendance workbook, emit one attendance variable per concrete "
+              "OT variant (for example field_code `salary_ot_day_normal_150` with variable name "
+              "`ot_day_normal_150`, and `salary_ot_night_rest_270` for night/rest). Set "
+              "category='SALARY_OT' and `ot_attributes: {shift_type: 'Day'|'Night', "
+              "day_type: 'Normal'|'Rest'|'Holiday', rate: 1.5|2.0|2.5|2.7|3.0|3.5|3.9}` on that variable "
+              "and its matching rule. Never emit scalar attendance variables named/field-coded "
+              "`shift_type` or `day_type`: those are attributes of a concrete OT rule, not worksheet "
+              "columns. `overtime_hours` is an optional derived aggregate and must not be categorized "
+              "as SALARY_OT. Use a SALARY_OT category only for one concrete OT variant with "
+              "ot_attributes; do not label aggregate totals such as total_overtime as SALARY_OT.")
     try:
         raw_response = client.complete(system=system, user=document_text)
     except (OSError, RuntimeError) as exc:
@@ -125,8 +112,8 @@ def repair_formula(
         "calculation_basis, variables, and rules. Do not explain. The validator errors are authoritative. "
         "Keep only calculations explicitly supported by the policy excerpt. Remove guessed rules rather than "
         "inventing assumptions. Use the canonical input fields when applicable: "
-        f"{_CANONICAL_PAYROLL_INPUTS}. Use canonical result codes when applicable: "
-        f"{_CANONICAL_PAYROLL_OUTPUTS}. Do not create numbered duplicate outputs such as *_2. "
+        f"{canonical_input_field_contract()}. Use canonical result codes when applicable: "
+        f"{canonical_output_field_contract()}. Do not create numbered duplicate outputs such as *_2. "
         "Each rule output_field must be unique. Every identifier referenced in an expression must be either "
         "a declared variable, an earlier unique output_field, or one of: prorate, round_down, tax_bracket_vn. "
         "Do not invent values or variables just to silence an error: remove an unsupported rule or use a "
@@ -174,64 +161,34 @@ def _candidate_from_response(
                             source_evidence=list(evidence_locations or []))
 
 
-def _variable_to_payload(variable: FormulaVariable) -> dict[str, Any]:
-    return {
-        "name": variable.name,
-        "source": variable.source,
-        "field_code": variable.field_code,
-        "value": variable.value,
-        "description": variable.description,
-        "category": variable.category.value if variable.category else None,
-        "role": variable.role.value if variable.role else None,
-        "ot_attributes": {
-            "shift_type": variable.ot_attributes.shift_type.value,
-            "day_type": variable.ot_attributes.day_type.value,
-            "rate": variable.ot_attributes.rate,
-        } if variable.ot_attributes else None,
-    }
-
-
-def _rule_to_payload(rule: FormulaRule) -> dict[str, Any]:
-    return {
-        "output_field": rule.output_field,
-        "expression": rule.expression,
-        "condition": rule.condition,
-        "rounding": rule.rounding,
-        "section": rule.section,
-        "description": rule.description,
-        "category": rule.category.value if rule.category else None,
-        "ot_attributes": {
-            "shift_type": rule.ot_attributes.shift_type.value,
-            "day_type": rule.ot_attributes.day_type.value,
-            "rate": rule.ot_attributes.rate,
-        } if rule.ot_attributes else None,
-    }
-
-
 _NON_IDENTIFIER_RE = re.compile(r"[^0-9a-zA-Z_]+")
-
-# Canonical integration codes are English so that FormulaSpec, Excel mappings
-# and the engine use one stable contract.  Vietnamese aliases are accepted from
-# the LLM and converted at the boundary.
-_FIELD_CODE_ALIASES = {
-    "luong_co_ban": "basic_salary", "luong_cb": "basic_salary", "basic": "basic_salary",
-    "ngay_cong": "total_working_days", "so_ngay_cong": "total_working_days",
-    "ngay_cong_chuan": "standard_working_days", "cong_chuan": "standard_working_days",
-    "tang_ca": "salary_ot_day_normal_150", "gio_tang_ca": "salary_ot_day_normal_150", "ot": "salary_ot_day_normal_150",
-    "gio_ca_dem": "night_shift_hours", "ca_dem": "night_shift_hours",
-    "ngay_phep": "annual_leave_days", "phep_nam": "annual_leave_days",
-    "nghi_thai_san": "maternity_leave_days", "thai_san": "maternity_leave_days",
-}
+_ALLOWED_VARIABLE_SOURCES = frozenset({"employee", "attendance", "rate_config", "regulatory", "literal"})
+_POLICY_SOURCES = frozenset({"policy_document", "policy", "document", "regulation", "regulations"})
 
 # Best-effort recognition of legacy per-rate OT field codes (OT_HOURS_150,
 # OT_DAY_SHIFT_150_HOURS, OT_HOLIDAY_NIGHT_SHIFT_350_HOURS, ...) so a document that still
 # talks about them collapses into the SALARY_OT(shift_type, day_type, rate) family instead
 # of creating a new one-off field_code per variant.
 _OT_KEYWORD_RE = re.compile(r"(^OT_)|(_OT$)|OVERTIME|TANG_?CA", re.IGNORECASE)
-_OT_RATE_RE = re.compile(r"(150|200|300)")
+_OT_RATE_RE = re.compile(r"(150|200|250|270|300|350|390)")
 _OT_NIGHT_RE = re.compile(r"NIGHT|CA_?DEM", re.IGNORECASE)
 _OT_HOLIDAY_RE = re.compile(r"HOLIDAY|NGAY_?LE|_LE(_|$)", re.IGNORECASE)
 _OT_REST_RE = re.compile(r"DAY_?OFF|NGAY_?NGHI|REST", re.IGNORECASE)
+_IF_THEN_ELSE_RE = re.compile(r"^if\s+(.+?)\s+then\s+(.+?)\s+else\s+(.+)$", re.IGNORECASE)
+
+
+def _normalize_expression_syntax(expression: str | None) -> str | None:
+    """Convert common LLM pseudo-syntax into the supported Python expression DSL."""
+    if not expression:
+        return expression
+    normalized = expression.strip().replace("employee.", "")
+    normalized = re.sub(r"\btrue\b", "True", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bfalse\b", "False", normalized, flags=re.IGNORECASE)
+    match = _IF_THEN_ELSE_RE.match(normalized)
+    if match:
+        condition, when_true, when_false = match.groups()
+        normalized = f"({when_true}) if ({condition}) else ({when_false})"
+    return normalized
 
 
 def _infer_ot_attributes(*texts: str | None) -> OTAttributes | None:
@@ -260,8 +217,7 @@ def _canonical_field_code(raw_code: Any, source: str | None) -> Any:
     """Translate known Vietnamese field aliases to the shared English contract."""
     if source not in {"employee", "attendance"} or raw_code is None:
         return raw_code
-    normalized = _slugify_identifier(str(raw_code), set())
-    return _FIELD_CODE_ALIASES.get(normalized, normalized)
+    return canonical_field_code(raw_code, source)
 
 
 _SOURCE_ALIASES = {
@@ -282,6 +238,60 @@ _SOURCE_ALIASES = {
 def _canonical_source(raw_source: Any) -> str:
     source = str(raw_source or "literal").strip().lower().replace("-", "_").replace(" ", "_")
     return _SOURCE_ALIASES.get(source, source)
+
+
+def _normalize_variable_source(item: dict[str, Any]) -> None:
+    """Repair common LLM source aliases into an executable input contract.
+
+    A number embedded in the policy is a literal.  It cannot be a `rate_config`
+    value without a rate key, and `policy_document` is evidence rather than a
+    runtime input source.  Keep genuinely external policy values as regulatory
+    inputs so the reviewer can provide them later.
+    """
+    source = str(item.get("source") or "").strip().lower()
+    if source in _POLICY_SOURCES:
+        item["source"] = "literal" if item.get("value") is not None else "regulatory"
+    elif source == "rate_config" and not item.get("field_code"):
+        item["source"] = "literal" if item.get("value") is not None else "rate_config"
+    elif source not in _ALLOWED_VARIABLE_SOURCES:
+        # Preserve a stated number, but never create an unsupported runtime source.
+        item["source"] = "literal" if item.get("value") is not None else "regulatory"
+    if item["source"] == "rate_config" and not item.get("field_code"):
+        item["field_code"] = item.get("name")
+    if item["source"] == "regulatory" and not item.get("field_code"):
+        item["field_code"] = item.get("name")
+
+
+def _normalize_rounding(raw: Any) -> str | None:
+    value = str(raw or "").strip().lower()
+    if not value or value in {"none", "no", "null"}: return None
+    if value in {"round", "round_to_nearest", "round_to_nearest_currency", "nearest_currency"}: return "round"
+    if value in {"round_down", "floor", "floor_currency"}: return "round_down_1000"
+    return value
+
+
+def _expression_or_none(raw: Any) -> str | None:
+    """Discard prose conditions, which cannot be evaluated by the payroll DSL."""
+    value = str(raw or "").strip()
+    if not value: return None
+    try:
+        ast.parse(value, mode="eval")
+    except SyntaxError:
+        return None
+    return value
+
+
+def _expression_names(expression: str | None) -> set[str]:
+    if not expression:
+        return set()
+    try:
+        tree = ast.parse(expression, mode="eval")
+    except SyntaxError:
+        return set()
+    # ``True`` and ``False`` are Names in Python's AST on some supported
+    # versions.  They are literals, never data-contract inputs.
+    return {node.id for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and node.id not in {"True", "False"}}
 
 
 def _parse_category(raw: Any) -> ComponentCategory | None:
@@ -327,13 +337,16 @@ def _sanitize_identifiers(payload: dict[str, Any]) -> dict[str, Any]:
     e.g. proposing "Lương cơ bản" instead of "luong_co_ban"."""
     used_names: set[str] = set()
     rename_map: dict[str, str] = {}
-    raw_rules = [dict(item) for item in payload.get("rules", []) if isinstance(item, dict)]
-    raw_output_names = {str(item.get("output_field") or "") for item in raw_rules}
 
-    def resolve(raw_name: str) -> str:
+    def resolve(raw_name: str, forced: str | None = None) -> str:
         raw_name = str(raw_name or "")
         if raw_name in rename_map:
             return rename_map[raw_name]
+        if forced:
+            candidate = forced if forced not in used_names else _slugify_identifier(forced, used_names)
+            used_names.add(candidate)
+            rename_map[raw_name] = candidate
+            return candidate
         if raw_name.isidentifier() and raw_name not in used_names:
             used_names.add(raw_name)
             return raw_name
@@ -341,18 +354,7 @@ def _sanitize_identifiers(payload: dict[str, Any]) -> dict[str, Any]:
         rename_map[raw_name] = new_name
         return new_name
 
-    def apply_rename(text: Any) -> str | None:
-        # Some providers serialize an unconditional rule as JSON true.  In our
-        # formula contract an absent condition means "always apply", so turn it
-        # into None before the expression validator sees it.  Other non-string
-        # conditions are deliberately preserved as a readable invalid value;
-        # the validator will report them rather than crashing Streamlit.
-        if text is True:
-            return None
-        if text is None:
-            return None
-        if not isinstance(text, str):
-            return str(text)
+    def apply_rename(text: str | None) -> str | None:
         if not text or not rename_map:
             return text
         for old, new in sorted(rename_map.items(), key=lambda kv: len(kv[0]), reverse=True):
@@ -363,35 +365,71 @@ def _sanitize_identifiers(payload: dict[str, Any]) -> dict[str, Any]:
     variables = []
     for item in payload.get("variables", []):
         item = dict(item)
-        item["source"] = _canonical_source(item.get("source"))
-        # A common LLM failure is to declare the result of a rule as a null
-        # literal variable as well (for example `basic_salary`), then emit the
-        # actual result as `basic_salary_2`.  It is not an input and makes the
-        # review screen request an impossible sample value.  Discard only this
-        # narrow, unambiguous shadow-variable case.
-        if (item["source"] == "literal" and item.get("value") is None
-                and item.get("role") == "salary_component"
-                and str(item.get("name") or "") in raw_output_names):
-            continue
-        item["name"] = resolve(item.get("name", ""))
+        raw_name = item.get("name", "")
+        _normalize_variable_source(item)
         item["field_code"] = _canonical_field_code(item.get("field_code"), item.get("source"))
-        # `field_code` is the join key between FormulaSpec and either the
-        # Excel mapping or company rate configuration.  Free models sometimes
-        # omit it despite supplying a valid variable name.  The variable name
-        # is the only safe deterministic fallback; never make up a semantic
-        # alternative here.
-        if item["source"] in {"employee", "attendance", "rate_config", "regulatory"} and not item["field_code"]:
-            item["field_code"] = item["name"]
+        # A service fee is a company-level rate.  Small models can emit a
+        # numbered duplicate (``service_fee_2_rate``) and incorrectly attach
+        # it to attendance; keep the variable name for expression references,
+        # but resolve it from one stable configuration key.
+        if item.get("field_code") == "service_fee_2_rate":
+            item["source"] = "rate_config"
+            item["field_code"] = "service_fee_rate"
+        field_code = item.get("field_code")
+        forced_name = (
+            field_code
+            if item.get("source") in {"employee", "attendance"}
+            and field_code
+            and str(field_code).isidentifier()
+            else None
+        )
+        item["name"] = resolve(raw_name, forced_name)
         variables.append(item)
 
     rules = []
-    for item in raw_rules:
-        item["expression"] = apply_rename(item.get("expression"))
-        item["condition"] = apply_rename(item.get("condition"))
+    seen_output_fields: set[str] = set()
+    for item in payload.get("rules", []):
+        item = dict(item)
+        item["expression"] = _normalize_expression_syntax(apply_rename(item.get("expression")))
+        item["condition"] = _expression_or_none(_normalize_expression_syntax(apply_rename(item.get("condition"))))
+        item["rounding"] = _normalize_rounding(item.get("rounding"))
         # Rename this rule's own output_field AFTER using it to rename expression/condition above,
         # so later rules that reference it (by its original name) still get rewritten correctly.
-        item["output_field"] = resolve(item.get("output_field", ""))
+        raw_output_field = str(item.get("output_field", ""))
+        item["output_field"] = resolve(raw_output_field)
+        if item["output_field"] in seen_output_fields:
+            item["output_field"] = _slugify_identifier(raw_output_field, used_names)
+        seen_output_fields.add(item["output_field"])
+        if str(item.get("section", "")).strip().lower() == "net":
+            # PayrollEngine derives NET from line_items - deductions; a separate
+            # net rule would be double-counted as an income item.
+            continue
         rules.append(item)
+
+    # If the policy writes an expression such as ``basic_salary / 26`` but the
+    # LLM only listed job-specific policy rates, retain the expression as a
+    # per-employee workbook input.  This is safer than arbitrarily choosing one
+    # job-specific rate for every worker; the review screen still exposes it.
+    defined = {item["name"] for item in variables}
+    outputs = {item["output_field"] for item in rules}
+    builtins = {"prorate", "round_down", "tax_bracket_vn"}
+    # A rule can use an Excel input either in its calculated value or only in
+    # its condition.  The earlier implementation only scanned expressions,
+    # which left condition-only inputs (for example an abandonment-day count)
+    # undeclared and made FormulaSpec validation fail.
+    referenced = set()
+    for rule in rules:
+        referenced.update(_expression_names(rule.get("expression")))
+        referenced.update(_expression_names(rule.get("condition")))
+    for name in sorted(referenced - defined - outputs - builtins):
+        is_service_fee_rate = name == "service_fee_2_rate"
+        source = "rate_config" if is_service_fee_rate else (
+            "employee" if name == "is_laid_off" or "salary" in name or "wage" in name else "attendance"
+        )
+        field_code = "service_fee_rate" if is_service_fee_rate else _canonical_field_code(name, source)
+        variables.append({"name": name, "source": source,
+                          "field_code": field_code,
+                          "description": "Input inferred from a formula expression; HR must verify the mapping."})
 
     return {**payload, "variables": variables, "rules": rules}
 
@@ -405,11 +443,7 @@ def _variable_with_metadata(item: dict[str, Any]) -> FormulaVariable:
             category = ComponentCategory.SALARY_OT
     elif ot_attributes is not None and category is None:
         category = ComponentCategory.SALARY_OT
-    if category is ComponentCategory.SALARY_OT and ot_attributes is None:
-        # Same defensive rule as FormulaRule: keep a malformed OT label
-        # reviewable instead of failing FormulaSpec construction outright.
-        category = None
-    return FormulaVariable(name=item["name"], source=_canonical_source(item.get("source")), field_code=item.get("field_code"),
+    return FormulaVariable(name=item["name"], source=item["source"], field_code=item.get("field_code"),
                            value=item.get("value"), description=item.get("description", ""),
                            category=category, role=_parse_role(item.get("role")), ot_attributes=ot_attributes)
 
@@ -429,19 +463,7 @@ def _rule_with_metadata(item: dict[str, Any]) -> FormulaRule:
     # review screen can show it for a human to approve or reject.
     if category is ComponentCategory.SALARY_OT and ot_attributes is None:
         output = str(item.get("output_field", "")).lower()
-        # SALARY_OT must carry shift/day/rate.  A free LLM may attach this
-        # label to unrelated basic/allowance rules.  Preserve the rule for the
-        # later validator/repair loop rather than rejecting the entire draft
-        # before it can be reviewed.
-        if "basic" in output or "base" in output:
-            category = ComponentCategory.BASIC
-        elif "allowance" in output:
-            category = ComponentCategory.ALLOWANCE
-        elif "bhx" in output or "insurance" in output:
-            category = ComponentCategory.BHXH
-        elif "pit" in output or "tax" in output:
-            category = ComponentCategory.PIT
-        else:
+        if output.startswith(("tong_", "total_")):
             category = None
     return FormulaRule(**{key: value for key, value in item.items()
                           if key in {"output_field", "expression", "condition", "rounding", "section", "description"}},

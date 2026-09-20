@@ -92,6 +92,7 @@ _UNARYOPS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 _CMPOPS = {
     ast.Lt: operator.lt, ast.LtE: operator.le, ast.Gt: operator.gt,
     ast.GtE: operator.ge, ast.Eq: operator.eq, ast.NotEq: operator.ne,
+    ast.In: operator.contains, ast.NotIn: lambda values, value: not operator.contains(values, value),
 }
 
 
@@ -99,7 +100,7 @@ def _eval_node(node: ast.AST, env: dict[str, Any]) -> Any:
     if isinstance(node, ast.Expression):
         return _eval_node(node.body, env)
     if isinstance(node, ast.Constant):
-        if isinstance(node.value, (int, float, bool)) or node.value is None:
+        if isinstance(node.value, (int, float, bool, str)) or node.value is None:
             return node.value
         raise UnsafeExpressionError(f"constant not allowed: {node.value!r}")
     if isinstance(node, ast.Name):
@@ -124,7 +125,8 @@ def _eval_node(node: ast.AST, env: dict[str, Any]) -> Any:
             if op is None:
                 raise UnsafeExpressionError(f"comparison not allowed: {type(op_node).__name__}")
             right = _eval_node(comparator, env)
-            result = result and op(left, right)
+            matches = op(right, left) if isinstance(op_node, (ast.In, ast.NotIn)) else op(left, right)
+            result = result and matches
             left = right
         return result
     if isinstance(node, ast.BoolOp):

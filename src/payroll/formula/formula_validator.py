@@ -4,6 +4,7 @@ import ast
 from dataclasses import dataclass, field
 from typing import Iterable
 
+from ..canonical_fields import CANONICAL_INPUT_FIELDS, canonical_field_code
 from ..expression_evaluator import BUILTIN_FUNCTIONS
 from .formula_schema import ALLOWED_SECTIONS, DEDUCTION_CATEGORIES, FormulaCandidate, FormulaSpec
 
@@ -27,7 +28,7 @@ _ALLOWED_NODES = {ast.Expression, ast.BinOp, ast.UnaryOp, ast.BoolOp, ast.Compar
                   ast.IfExp, ast.Call, ast.Name, ast.Load, ast.Constant, ast.Add,
                   ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.UAdd,
                   ast.USub, ast.Not, ast.And, ast.Or, ast.Eq, ast.NotEq, ast.Lt,
-                  ast.LtE, ast.Gt, ast.GtE}
+                  ast.LtE, ast.Gt, ast.GtE, ast.In, ast.NotIn, ast.List, ast.Tuple}
 
 
 def validate_formula(candidate: FormulaCandidate, context: ValidationContext) -> ValidationResult:
@@ -39,6 +40,23 @@ def validate_formula(candidate: FormulaCandidate, context: ValidationContext) ->
     for variable in variables.values():
         if variable.source not in context.allowed_variable_sources:
             errors.append(f"variable {variable.name}: source is not in the approved data contract: {variable.source}")
+        if variable.source in {"employee", "attendance"} and variable.field_code:
+            canonical_code = canonical_field_code(variable.field_code, variable.source)
+            if variable.field_code != canonical_code:
+                errors.append(
+                    f"variable {variable.name}: field_code {variable.field_code!r} is an alias; "
+                    f"use canonical code {canonical_code!r}"
+                )
+            elif canonical_code not in CANONICAL_INPUT_FIELDS:
+                warnings.append(
+                    f"variable {variable.name}: field_code {canonical_code!r} is a tenant-specific extension "
+                    "outside the shared canonical registry"
+                )
+        if variable.source == "attendance" and str(variable.field_code or "").lower() in {"shift_type", "day_type"}:
+            errors.append(
+                f"variable {variable.name}: {variable.field_code} is OT rule metadata, not a monthly attendance column; "
+                "use a concrete salary_ot_<shift>_<day_type>_<rate> input instead"
+            )
     outputs = [rule.output_field for rule in spec.rules]
     if len(outputs) != len(set(outputs)): errors.append("duplicate output_field across rules")
     for output in outputs:
@@ -52,7 +70,7 @@ def validate_formula(candidate: FormulaCandidate, context: ValidationContext) ->
     rules_by_output = {rule.output_field: rule for rule in spec.rules}
     for rule in spec.rules:
         names = _validate_expression(rule.expression, rule.output_field, context.allowed_functions, errors)
-        if rule.condition is not None:
+        if rule.condition:
             names |= _validate_expression(rule.condition, rule.output_field, context.allowed_functions, errors)
         unknown = names - set(variables) - output_set
         if unknown: errors.append(f"rule {rule.output_field}: unknown variable(s) {sorted(unknown)}")
@@ -95,13 +113,7 @@ def _validate_net_consistency(spec: FormulaSpec, rules_by_output: dict[str, "obj
                         "NET = income - deductions cannot be computed from this spec alone")
 
 
-def _validate_expression(expression: object, rule_code: str, allowed_functions: Iterable[str], errors: list[str]) -> set[str]:
-    # LLM JSON is untrusted.  Return a validation error for a boolean/list/etc.
-    # instead of passing it to ast.parse(), which raises TypeError and crashes
-    # the review screen.
-    if not isinstance(expression, str):
-        errors.append(f"rule {rule_code}: expression/condition must be a string, got {type(expression).__name__}")
-        return set()
+def _validate_expression(expression: str, rule_code: str, allowed_functions: Iterable[str], errors: list[str]) -> set[str]:
     try: tree = ast.parse(expression, mode="eval")
     except SyntaxError:
         errors.append(f"rule {rule_code}: invalid expression syntax: {expression!r}"); return set()
@@ -113,15 +125,17 @@ def _validate_expression(expression: object, rule_code: str, allowed_functions: 
         if isinstance(node, ast.Call):
             if not isinstance(node.func, ast.Name) or node.func.id not in allowed or node.keywords:
                 errors.append(f"rule {rule_code}: only approved positional function calls are allowed")
-        elif isinstance(node, ast.Name) and node.id not in allowed:
+        elif isinstance(node, ast.Name) and node.id not in allowed and node.id not in {"True", "False"}:
             names.add(node.id)
-        elif isinstance(node, ast.Constant) and not isinstance(node.value, (int, float, bool)):
-            errors.append(f"rule {rule_code}: only numeric/boolean constants are allowed")
+        elif isinstance(node, ast.Constant) and not isinstance(node.value, (int, float, bool, str)):
+            errors.append(f"rule {rule_code}: only numeric/boolean/string constants are allowed")
     return names
 
 
 def _validate_rounding(rounding: str, rule_code: str, errors: list[str]) -> None:
     if rounding == "round": return
+    if rounding == "round_down":
+        return
     prefix = "round_down_"
     if not rounding.startswith(prefix): errors.append(f"rule {rule_code}: invalid rounding {rounding!r}"); return
     try:
