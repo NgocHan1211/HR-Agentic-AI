@@ -1,14 +1,10 @@
-"""Chat-oriented Streamlit UI for document-driven, multi-sheet payroll."""
+"""Simple Streamlit workflow for policy-driven payroll calculation."""
 from __future__ import annotations
 
-from dataclasses import asdict
-from datetime import date
 from io import BytesIO
 import json
 import mimetypes
-import re
 import sys
-import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -16,547 +12,621 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 import pandas as pd
 import streamlit as st
-from openpyxl import Workbook
 
-from payroll.anomaly_router import can_publish
 from payroll.engine import run_payroll
-from payroll.formula import (FormulaCandidateStore, FormulaExtractionError, ReviewStatus, ValidationContext,
-                             activate_formula_version, extract_formula, formula_to_engine_dict,
-                             render_for_review, repair_formula, review_formula, validate_formula)
-from payroll.ingestion import SheetMappingSpec, normalize_attendance, normalize_salary_schema, validate_ingested_data
+from payroll.field_catalog import (
+    normalize_field_label,
+    suggest_formula_column_mapping,
+    suggested_field_code,
+)
+from payroll.formula import FormulaExtractionError, ValidationContext, extract_formula, formula_to_engine_dict, validate_formula
+from payroll.formula.direct_editor import DirectFormulaEditError, apply_direct_formula_edits
+from payroll.ingestion import SheetMappingSpec, normalize_attendance, normalize_salary_schema, read_payroll_sheet, validate_ingested_data
 from policy_update.parsers.base_parser import DocumentRole, ParseRequest, Persistence, SourceRef
-from policy_update.parsers.excel_parser import ExcelParser
 from policy_update.parsers.parser_factory import ParserFactory
-from policy_update.rag import retrieve_payroll_context
-
-NONE = "— Không dùng —"
-st.set_page_config(page_title="Trợ lý Payroll AI", layout="wide")
-st.title("Trợ lý Payroll AI")
-st.caption("Quy chế → FormulaSpec nháp → validate → HR review/Activate → map workbook → tính lương → review anomaly.")
 
 
-def default_formula(company_id: str) -> dict[str, Any]:
-    return {"formula_id": "F-DEMO-v1", "company_id": company_id, "status": "active", "calculation_basis": "monthly",
-            "field_categories": {"BASIC": "line_items", "SALARY_OT_DAY_NORMAL_150": "line_items",
-                                 "SALARY_OT_NIGHT_HOLIDAY_300": "line_items", "SI_EE": "deductions",
-                                 "PIT_AMOUNT": "deductions", "SALARY_ADVANCE": "deductions"},
-            "variables": [{"name": "basic", "source": "employee", "field_code": "basic_salary"},
-                          {"name": "worked", "source": "attendance", "field_code": "total_working_days"},
-                          {"name": "standard", "source": "attendance", "field_code": "standard_working_days"},
-                          {"name": "ot_day_normal", "source": "attendance", "field_code": "salary_ot_day_normal_150",
-                           "category": "SALARY_OT", "role": "input_variable",
-                           "ot_attributes": {"shift_type": "Day", "day_type": "Normal", "rate": 1.5}},
-                          {"name": "ot_night_holiday", "source": "attendance", "field_code": "salary_ot_night_holiday_300",
-                           "category": "SALARY_OT", "role": "input_variable",
-                           "ot_attributes": {"shift_type": "Night", "day_type": "Holiday", "rate": 3.0}},
-                          {"name": "advance", "source": "employee", "field_code": "salary_advance"},
-                          {"name": "pit_rate", "source": "literal", "value": 0.10}],
-            "rules": [{"output_field": "BASIC", "expression": "prorate(basic, worked, standard)", "rounding": "round_down_1000",
-                      "section": "line_items", "category": "BASIC"},
-                     {"output_field": "SALARY_OT_DAY_NORMAL_150", "expression": "BASIC / standard / 8 * ot_day_normal * 1.5",
-                      "rounding": "round_down_1000", "section": "line_items", "category": "SALARY_OT",
-                      "ot_attributes": {"shift_type": "Day", "day_type": "Normal", "rate": 1.5}},
-                     {"output_field": "SALARY_OT_NIGHT_HOLIDAY_300", "expression": "BASIC / standard / 8 * ot_night_holiday * 3.0",
-                      "rounding": "round_down_1000", "section": "line_items", "category": "SALARY_OT",
-                      "ot_attributes": {"shift_type": "Night", "day_type": "Holiday", "rate": 3.0}},
-                     {"output_field": "SI_EE", "expression": "BASIC * .105", "section": "deductions", "category": "BHXH"},
-                     {"output_field": "PIT_AMOUNT", "expression": "BASIC * pit_rate", "section": "deductions", "category": "PIT"},
-                     {"output_field": "SALARY_ADVANCE", "expression": "advance", "section": "deductions", "category": "DEDUCTION_OTHER"}]}
+st.set_page_config(page_title="Tính lương từ chính sách", layout="wide")
+st.title("Tính lương từ chính sách")
+st.caption("1. Upload PDF chính sách · 2. Kiểm tra công thức · 3. Upload Excel · 4. Tính lương")
 
 
-def file_bytes(uploaded: Any) -> bytes:
+def uploaded_bytes(uploaded: Any) -> bytes:
     uploaded.seek(0)
     return uploaded.getvalue()
 
 
-@st.cache_data(show_spinner=False)
-def workbook_sheet_names(data: bytes) -> list[str]:
-    return list(pd.ExcelFile(BytesIO(data)).sheet_names)
+def parse_policy(uploaded: Any) -> tuple[str, list[str], list[dict[str, Any]]]:
+    data = uploaded_bytes(uploaded)
+    suffix = Path(uploaded.name).suffix.lower()
+    request = ParseRequest(
+        SourceRef(f"policy-{uploaded.name}", uploaded.name, Persistence.TEMPORARY),
+        BytesIO(data),
+        uploaded.name,
+        suffix,
+        mimetypes.guess_type(uploaded.name)[0] or "application/pdf",
+        len(data),
+        DocumentRole.POLICY,
+        enable_ocr=True,
+        language_hint="vie+eng",
+    )
+    parsed = ParserFactory.create(request).parse(request)
+    evidence = [
+        {
+            "block_id": block.block_id,
+            "page": block.location.page,
+            "section_path": block.location.section_path,
+            "text": block.normalized_text[:400],
+        }
+        for block in parsed.blocks
+        if block.normalized_text
+    ]
+    return (
+        "\n".join(block.normalized_text for block in parsed.blocks if block.normalized_text),
+        [warning.message for warning in parsed.warnings],
+        evidence,
+    )
 
 
-@st.cache_data(show_spinner=False)
-def workbook_sheet(data: bytes, sheet_name: str, header_row: int) -> pd.DataFrame:
-    return pd.read_excel(BytesIO(data), sheet_name=sheet_name, header=header_row - 1).dropna(how="all")
-
-
-DEFAULT_FIELD_CODES = ("BASIC, SALARY_OT_DAY_NORMAL_150, SALARY_OT_NIGHT_HOLIDAY_300, "
-                       "SALARY_ADVANCE, SI_EE, PIT_AMOUNT")
-
-
-def formula_candidate_from_text(text: str, evidence: list[dict[str, Any]]) -> Any:
-    """Extract once, then make one bounded repair attempt for an invalid LLM draft.
-
-    The candidate still goes through the existing validation, review and Activate
-    screens.  This only prevents an LLM formatting mistake from stopping the
-    workflow before HR can review it.
-    """
-    candidate = extract_formula(text, "UPLOAD", evidence)
-    provisional_context = formula_context_from_text(DEFAULT_FIELD_CODES, candidate)
-    validation = validate_formula(candidate, provisional_context)
-    if not validation.passed:
-        candidate = repair_formula(text, candidate, validation.errors, evidence)
-    return candidate
-
-
-def formula_context_from_text(field_codes_text: str, candidate: Any | None = None) -> ValidationContext:
-    configured_codes = {item.strip() for item in field_codes_text.split(",") if item.strip()}
-    # The default list is a demo catalog.  A policy for another company can
-    # legitimately propose monthly_salary, net_pay, etc.  Keep those proposal
-    # codes available for review; actual workbook mapping still has to be
-    # explicitly confirmed later by HR.
-    proposed_codes = {
-        rule.output_field for rule in candidate.proposed_spec.rules
-    } if candidate is not None else set()
-    field_codes = frozenset(configured_codes | proposed_codes)
-    if not field_codes:
-        raise ValueError("Cần nhập ít nhất một mã khoản tính được phép.")
+def validation_context(candidate: Any) -> ValidationContext:
+    outputs = {rule.output_field for rule in candidate.proposed_spec.rules}
+    outputs.update(candidate.proposed_spec.field_categories)
     return ValidationContext(
         allowed_variable_sources=frozenset({"employee", "attendance", "rate_config", "regulatory", "literal"}),
-        field_codes=field_codes,
+        field_codes=frozenset(outputs),
     )
 
 
-def review_values(candidate: Any, raw_json: str) -> dict[str, float | bool]:
-    try:
-        values = json.loads(raw_json)
-    except json.JSONDecodeError as exc:
-        raise ValueError("Dữ liệu mẫu phải là JSON hợp lệ.") from exc
-    if not isinstance(values, dict):
-        raise ValueError("Dữ liệu mẫu phải là một JSON object.")
-    literals = {item.name: item.value for item in candidate.proposed_spec.variables
-                if item.source == "literal" and item.value is not None}
-    return {**literals, **values}
+def formula_inputs(formula: dict[str, Any], source: str) -> set[str]:
+    return {
+        str(variable["field_code"])
+        for variable in formula.get("variables", [])
+        if variable.get("source") == source and variable.get("field_code")
+    }
 
 
-def document_text(uploaded: Any) -> tuple[str, list[str], list[dict[str, Any]]]:
-    data, suffix = file_bytes(uploaded), Path(uploaded.name).suffix.lower()
-    mime = mimetypes.guess_type(uploaded.name)[0] or "application/octet-stream"
-    request = ParseRequest(SourceRef(f"policy-{uploaded.name}", uploaded.name, Persistence.TEMPORARY), BytesIO(data),
-                           uploaded.name, suffix, mime, len(data), DocumentRole.POLICY, enable_ocr=True,
-                           language_hint="vie+eng")
-    parsed = ParserFactory.create(request).parse(request)
-    retrieval = retrieve_payroll_context(parsed)
-    warnings = [warning.message for warning in parsed.warnings]
-    warnings.append(
-        f"RAG đã chọn {retrieval.selected_chunk_count}/{retrieval.total_chunk_count} đoạn liên quan lương để gửi LLM."
+def find_employee_id_column(columns: list[str]) -> str | None:
+    preferred = {
+        "employee_id",
+        "employee_code",
+        "ma_nv",
+        "ma_nhan_vien",
+        "ma_cham_cong",
+        "msnv",
+        "ms_nv",
+    }
+    normalized = {normalize_field_label(column): column for column in columns}
+    for key in preferred:
+        if key in normalized:
+            return normalized[key]
+    return next(
+        (
+            column
+            for column in columns
+            if "employee" in normalize_field_label(column)
+            and any(word in normalize_field_label(column) for word in ("id", "code"))
+        ),
+        None,
     )
-    if not retrieval.text:
-        raise ValueError(
-            "RAG không tìm thấy điều khoản lương/phụ cấp/OT/BHXH/thuế đủ liên quan trong tài liệu. "
-            "Hãy upload quy chế lương hoặc bổ sung phần chính sách tính lương."
-        )
-    return retrieval.text, warnings, retrieval.evidence
 
 
-@st.cache_data(show_spinner=False)
-def excel_features(data: bytes, name: str) -> tuple[list[dict[str, Any]], list[str]]:
-    request = ParseRequest(SourceRef(f"workbook-{name}", name, Persistence.TEMPORARY), BytesIO(data), name,
-                           Path(name).suffix, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           len(data), DocumentRole.ATTENDANCE)
-    parsed = ExcelParser().parse(request)
-    tables: dict[tuple[str, int | None], dict[str, Any]] = {}
-    for block in parsed.blocks:
-        if block.block_type.value != "table_row": continue
-        key = (block.location.sheet or "Unknown", block.location.table_index)
-        item = tables.setdefault(key, {"Sheet": key[0], "Table": key[1], "Số dòng": 0, "Cột phát hiện": ""})
-        item["Số dòng"] += 1
-        if not item["Cột phát hiện"]: item["Cột phát hiện"] = ", ".join(block.metadata.get("headers", []))
-    return list(tables.values()), [f"{item.code}: {item.message}" for item in parsed.warnings]
+def read_excel_sheet(data: bytes, sheet_name: str, header_row: int, data_start_row: int | None = None) -> pd.DataFrame:
+    config: dict[str, Any] = {"header_row": header_row - 1}
+    if data_start_row is not None:
+        config["data_start_row"] = data_start_row
+    return read_payroll_sheet(BytesIO(data), sheet_name, config)
 
 
-def normalized_label(value: str) -> str:
-    """Compare Excel headers independently of accents, punctuation and case."""
-    value = unicodedata.normalize("NFKD", str(value).lower().replace("đ", "d"))
-    value = "".join(char for char in value if not unicodedata.combining(char))
-    return re.sub(r"[^a-z0-9]+", " ", value).strip()
+def raw_excel_preview(data: bytes, sheet_name: str) -> pd.DataFrame:
+    """Show row numbers before HR decides which row is the header."""
+    preview = pd.read_excel(BytesIO(data), sheet_name=sheet_name, header=None, nrows=20)
+    preview.index = preview.index + 1  # Excel uses one-based row numbers.
+    preview.index.name = "Dòng Excel"
+    return preview
 
 
-def suggest(columns: list[str], words: tuple[str, ...]) -> str:
-    for column in columns:
-        value = column.lower().replace("đ", "d")
-        value = normalized_label(column)
-        if any(word in value for word in words): return column
-    return NONE
+def display_dataframe(frame: pd.DataFrame) -> pd.DataFrame:
+    """Return an Arrow-safe copy for Streamlit previews.
+
+    ERP exports often put numbers, strings, merged-cell values, and nested
+    objects in the same pandas ``object`` column. PyArrow cannot serialize
+    those mixed columns, while payroll calculation still needs the original
+    frame and its numeric values. This helper is therefore display-only.
+    """
+    def render(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (dict, list, tuple, set)):
+            return json.dumps(value, ensure_ascii=False, default=str)
+        try:
+            if bool(pd.isna(value)):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        return str(value)
+
+    return frame.map(render)
 
 
-_OT_RATE_RE = re.compile(r"(150|200|300)")
+def mapping_rows(mapping: dict[str, str], source: str) -> list[dict[str, str]]:
+    return [
+        {"Nguồn": source, "Cột Excel": column, "Chuẩn hóa thành": field_code}
+        for field_code, column in mapping.items()
+    ]
 
 
-def _suggest_ot_field_code(normalized_name: str) -> str:
-    """Disambiguate OT columns by shift/day-type/rate (SALARY_OT taxonomy), so two
-    different OT columns (e.g. '...150%' and '...300%') never collapse onto the same
-    field_code the way a single flat 'tang ca' -> 'ot_..._hours' rule would."""
-    shift = "night" if re.search(r"\bdem\b", normalized_name) else "day"
-    if re.search(r"\ble\b", normalized_name):
-        day_type = "holiday"
-    elif re.search(r"\bnghi\b|\brest\b", normalized_name):
-        day_type = "rest"
-    else:
-        day_type = "normal"
-    rate_match = _OT_RATE_RE.search(normalized_name)
-    rate = rate_match.group(1) if rate_match else "150"
-    return f"salary_ot_{shift}_{day_type}_{rate}"
+def formula_table(candidate: Any) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "Khoản tính": rule.output_field,
+                "Công thức": rule.expression,
+                "Nhóm": rule.section or candidate.proposed_spec.field_categories.get(rule.output_field, "Thu nhập"),
+                "Điều kiện": rule.condition or "Luôn áp dụng",
+            }
+            for rule in candidate.proposed_spec.rules
+        ]
+    )
 
 
-def suggested_field_code(column: str) -> str:
-    """Useful defaults; HR may freely replace these with company-specific codes."""
-    name = column.lower().replace("đ", "d")
-    name = normalized_label(column)
-    if any(term in name for term in ("luong cb", "luong thang", "muc luong", "tien luong")): return "basic_salary"
-    if any(term in name for term in ("so cong", "ngay lam viec", "cong thuc te")): return "total_working_days"
-    if any(term in name for term in ("cong chuan", "dinh muc cong")): return "standard_working_days"
-    if any(term in name for term in ("tang ca", "gio tang ca", "lam them")): return _suggest_ot_field_code(name)
-    if any(term in name for term in ("gio ca dem", "lam dem")): return "night_shift_hours"
-    if "luong co ban" in name or "basic" in name: return "basic_salary"
-    if "ngay cong chuan" in name or "standard" in name: return "standard_working_days"
-    if "ngay cong" in name or "worked" in name: return "total_working_days"
-    if "ot" in name or "overtime" in name: return _suggest_ot_field_code(name)
-    if "ca dem" in name or "night" in name: return "night_shift_hours"
-    if "phep" in name or "leave" in name: return "annual_leave_days"
-    if "thai san" in name or "maternity" in name: return "maternity_leave_days"
-    if "tam ung" in name or "advance" in name: return "salary_advance"
-    return re.sub(r"\W+", "_", name).strip("_") or "field"
+def formula_input_table(candidate: Any) -> pd.DataFrame:
+    def input_location(variable: Any) -> str:
+        if variable.source == "literal":
+            return "Hằng số lấy từ PDF"
+        if variable.source in {"rate_config", "regulatory"}:
+            return "Hằng số từ PDF" if variable.value is not None else "Cột Excel (map như thông tin nhân viên)"
+        return "Cột Excel"
+
+    return pd.DataFrame(
+        [
+            {
+                "Biến trong công thức": variable.name,
+                "Nguồn do công thức đề xuất": variable.source,
+                "Cách lấy dữ liệu khi tính": input_location(variable),
+                "Cột Excel nếu cần": variable.field_code or "Không cần",
+                "Giá trị cố định": variable.value if variable.value is not None else "",
+            }
+            for variable in candidate.proposed_spec.variables
+        ]
+    )
 
 
-def field_mappings(columns: list[str], employee_id_column: str, key_prefix: str) -> dict[str, str]:
-    """Let HR name canonical fields; those names are the formula field_code contract."""
-    candidates = [column for column in columns if column != employee_id_column]
-    selected = st.multiselect("Các cột dùng cho payroll", candidates, default=candidates, key=f"{key_prefix}_columns")
-    mapping = {employee_id_column: "employee_id"}
-    for column in selected:
-        default = suggested_field_code(column)
-        mapping[column] = st.text_input(f"Tên trường chuẩn cho ‘{column}’", default, key=f"{key_prefix}_{column}").strip()
-    return {source: target for source, target in mapping.items() if target}
+def editable_variable_table(candidate: Any) -> pd.DataFrame:
+    """Build the HR-editable view of all formula inputs and fixed parameters."""
+    return pd.DataFrame(
+        [
+            {
+                "name": variable.name,
+                "source": variable.source,
+                "field_code": variable.field_code or "",
+                "value": variable.value,
+                "description": variable.description,
+            }
+            for variable in candidate.proposed_spec.variables
+        ],
+        columns=["name", "source", "field_code", "value", "description"],
+    )
 
 
-def suggested_field_mappings(columns: list[str], employee_id_column: str, key_prefix: str,
-                             required_codes: set[str]) -> dict[str, str]:
-    """Editable mapping with conservative automatic field selection."""
-    candidates = [column for column in columns if column != employee_id_column]
-    defaults = [column for column in candidates if suggested_field_code(column) in required_codes]
-    if required_codes and not defaults:
-        st.info("Chưa nhận ra tên cột theo FormulaSpec. Hãy chọn cột bên dưới; app sẽ đề xuất mã trường khi bạn chọn.")
-    selected = st.multiselect("Các cột dùng cho payroll", candidates, default=defaults, key=f"{key_prefix}_columns",
-                              help="Đã gợi ý từ tên cột và FormulaSpec; bạn có thể thêm hoặc bỏ cột.")
-    mapping = {employee_id_column: "employee_id"}
-    for column in selected:
-        mapping[column] = st.text_input(f"Tên trường chuẩn cho ‘{column}’", suggested_field_code(column),
-                                        key=f"{key_prefix}_{column}").strip()
-    return {source: target for source, target in mapping.items() if target}
+def editable_rule_table(candidate: Any) -> pd.DataFrame:
+    """Build the HR-editable view of formula rules without exposing model internals."""
+    return pd.DataFrame(
+        [
+            {
+                "output_field": rule.output_field,
+                "expression": rule.expression,
+                "condition": rule.condition or "",
+                "rounding": rule.rounding or "",
+                "section": rule.section or "",
+                "description": rule.description,
+            }
+            for rule in candidate.proposed_spec.rules
+        ],
+        columns=["output_field", "expression", "condition", "rounding", "section", "description"],
+    )
 
 
-def formula_required_codes(formula: dict[str, Any]) -> set[str]:
-    return {str(item.get("field_code")) for item in formula.get("variables", [])
-            if item.get("source") in {"employee", "attendance"} and item.get("field_code")}
+def editor_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    """Turn Streamlit/Pandas empty cells into plain None values for the domain layer."""
+    records: list[dict[str, Any]] = []
+    for row in frame.to_dict("records"):
+        cleaned: dict[str, Any] = {}
+        for key, value in row.items():
+            try:
+                cleaned[key] = None if bool(pd.isna(value)) else value
+            except (TypeError, ValueError):
+                cleaned[key] = value
+        records.append(cleaned)
+    return records
 
 
-def formula_codes_for_source(formula: dict[str, Any], source: str) -> set[str]:
-    """Return only the spreadsheet fields consumed from one input source."""
-    return {str(item.get("field_code")) for item in formula.get("variables", [])
-            if item.get("source") == source and item.get("field_code")}
+def prepare_formula_for_excel(formula: dict[str, Any]) -> dict[str, Any]:
+    """Adapt policy/config values to the PDF + one-Excel-file HR workflow.
+
+    A numeric value extracted from the PDF is a literal.  A config/regulatory
+    variable without a value must be supplied by the uploaded workbook, so it
+    is treated as an employee-level Excel input for this streamlined UI.
+    """
+    prepared_variables = []
+    for raw_variable in formula.get("variables", []):
+        variable = dict(raw_variable)
+        if variable.get("source") in {"rate_config", "regulatory"}:
+            variable["source"] = "literal" if variable.get("value") is not None else "employee"
+        prepared_variables.append(variable)
+    return {**formula, "variables": prepared_variables}
 
 
-def mapping_for_codes(mapping: dict[str, str], codes: set[str]) -> dict[str, str]:
-    """Keep the ID plus fields required by a particular payroll input."""
-    return {column: field for column, field in mapping.items()
-            if field == "employee_id" or field in codes}
+def result_table(results: list[Any]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "Mã nhân viên": result.employee_id,
+                "Gross": result.gross_salary,
+                "Khấu trừ": sum(item.amount for item in result.deductions),
+                "Net": result.net_salary,
+                "Cần kiểm tra": ", ".join(flag.code for flag in result.anomaly_flags) or "Không",
+            }
+            for result in results
+        ]
+    )
 
 
-def show_formula_summary(formula: dict[str, Any]) -> None:
-    source_names = {"employee": "Hồ sơ nhân viên", "attendance": "Chấm công", "rate_config": "Cấu hình mức lương",
-                    "regulatory": "Quy định", "literal": "Giá trị cố định"}
-    st.caption(f"Cơ sở tính: {formula.get('calculation_basis', 'monthly')} · {len(formula.get('rules', []))} bước tính")
-    variables = [{"Biến": item.get("name"), "Lấy từ": source_names.get(item.get("source"), item.get("source")),
-                  "Trường dữ liệu": item.get("field_code") or "—", "Mô tả": item.get("description") or "—"}
-                 for item in formula.get("variables", [])]
-    if variables:
-        st.dataframe(pd.DataFrame(variables), hide_index=True, use_container_width=True)
-    rules = [{"Khoản tính": item.get("output_field"), "Công thức": item.get("expression"),
-              "Điều kiện": item.get("condition") or "Luôn áp dụng", "Nhóm": item.get("section") or "Thu nhập",
-              "Làm tròn": item.get("rounding") or "—", "Diễn giải": item.get("description") or "—"}
-             for item in formula.get("rules", [])]
-    if rules:
-        st.dataframe(pd.DataFrame(rules), hide_index=True, use_container_width=True)
-    with st.expander("Xem JSON kỹ thuật"):
-        st.json(formula)
+if "formula_candidate" not in st.session_state:
+    st.session_state.formula_candidate = None
+if "policy_text" not in st.session_state:
+    st.session_state.policy_text = ""
+if "policy_evidence" not in st.session_state:
+    st.session_state.policy_evidence = []
+if "formula_feedback" not in st.session_state:
+    st.session_state.formula_feedback = []
+if "formula_editor_revision" not in st.session_state:
+    st.session_state.formula_editor_revision = 0
 
 
-def validation_message(validation: Any) -> str:
-    unknown = [error for error in validation.errors if "employee_id not found in salary schema" in error]
-    other = [error for error in validation.errors if error not in unknown]
-    messages = list(other)
-    if unknown:
-        examples = [error.split(":", 1)[0].replace("attendance ", "") for error in unknown[:8]]
-        messages.append(f"{len(unknown)} mã nhân viên từ chấm công không có trong sheet nhân viên (ví dụ: {', '.join(examples)}). "
-                        "Kiểm tra lại cột Mã nhân viên ở mỗi sheet; mã phải cùng định dạng.")
-    return " | ".join(messages)
+def set_formula_candidate(candidate: Any) -> None:
+    """Replace the candidate and reset data-editor widget state on the next run."""
+    st.session_state.formula_candidate = candidate
+    st.session_state.formula_editor_revision += 1
 
+company_id = st.text_input("Mã công ty", value="UPLOAD")
+period = st.text_input("Kỳ lương", value="2025-05")
 
-def final_excel(results: list[Any]) -> bytes:
-    book = Workbook(); summary = book.active; summary.title = "Bang_luong_final"
-    summary.append(["Mã nhân viên", "Kỳ", "Gross", "Khấu trừ", "Net", "Publish", "Anomaly"])
-    flags = book.create_sheet("Canh_bao_anomaly"); flags.append(["Mã nhân viên", "Mã", "Mức độ", "Thông điệp", "Actual", "Threshold"])
-    used = set(book.sheetnames)
-    for result in results:
-        summary.append([result.employee_id, result.period, result.gross_salary, sum(x.amount for x in result.deductions), result.net_salary,
-                        "Được phép" if can_publish(result) else "Chờ review", ", ".join(x.code for x in result.anomaly_flags)])
-        for flag in result.anomaly_flags: flags.append([result.employee_id, flag.code, flag.severity, flag.message, flag.actual, flag.threshold])
-        name = re.sub(r"[\\/*?:\[\]]", "_", str(result.employee_id))[:31] or "payslip"
-        while name in used: name = f"{name[:28]}_x"
-        used.add(name); payslip = book.create_sheet(name)
-        payslip.append(["Mã nhân viên", result.employee_id]); payslip.append(["Kỳ lương", result.period]); payslip.append([]); payslip.append(["Nhóm", "Mã khoản", "Số tiền"])
-        for item in result.line_items: payslip.append(["Thu nhập", item.field_code, item.amount])
-        for item in result.deductions: payslip.append(["Khấu trừ", item.field_code, -item.amount])
-        payslip.append([]); payslip.append(["Gross", result.gross_salary]); payslip.append(["Net", result.net_salary])
-    for sheet in book.worksheets:
-        sheet.freeze_panes = "A2"
-        for col in sheet.columns: sheet.column_dimensions[col[0].column_letter].width = min(max(len(str(cell.value or "")) for cell in col) + 2, 45)
-    output = BytesIO(); book.save(output); return output.getvalue()
+st.subheader("1. Chính sách lương (PDF)")
+policy_file = st.file_uploader("Upload PDF chính sách", type=["pdf"])
 
-
-if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "Chào HR! Bạn có thể nhập hướng dẫn tính lương ở dưới, hoặc upload PDF/DOCX/TXT quy chế. Sau đó upload **một workbook Excel duy nhất** và map các sheet nguồn."}]
-if "formula" not in st.session_state: st.session_state.formula = None
-if "formula_store" not in st.session_state: st.session_state.formula_store = FormulaCandidateStore()
-if "formula_candidate" not in st.session_state: st.session_state.formula_candidate = None
-if "formula_context" not in st.session_state: st.session_state.formula_context = None
-if "payroll_results" not in st.session_state: st.session_state.payroll_results = []
-if "payroll_feedback" not in st.session_state: st.session_state.payroll_feedback = []
-if "payroll_failures" not in st.session_state: st.session_state.payroll_failures = []
-if "payroll_period" not in st.session_state: st.session_state.payroll_period = ""
-
-if st.session_state.payroll_results:
-    st.subheader("Báo sai / yêu cầu sửa")
-    st.caption("Phản hồi được lưu cùng kết quả của phiên làm việc này để HR theo dõi và xử lý trước khi chốt lương.")
-    employee_options = ["Toàn bộ bảng lương", *[item.employee_id for item in st.session_state.payroll_results]]
-    with st.form("payroll_feedback_form", clear_on_submit=True):
-        feedback_employee = st.selectbox("Nhân viên bị ảnh hưởng", employee_options)
-        feedback_type = st.selectbox("Phân loại lỗi", [
-            "Sai dữ liệu đầu vào", "Sai công thức tính", "Thiếu hoặc sai chính sách", "Kết quả cần kiểm tra", "Khác"
-        ])
-        feedback_detail = st.text_area("Mô tả lỗi", placeholder="Ví dụ: NV001 có 10 giờ OT, nhưng bảng đang dùng 12 giờ.")
-        expected_change = st.text_area("Kết quả hoặc dữ liệu mong muốn", placeholder="Ví dụ: điều chỉnh OT về 10 giờ và tính lại.")
-        submitted = st.form_submit_button("Gửi yêu cầu sửa")
-    if submitted:
-        if not feedback_detail.strip():
-            st.error("Hãy mô tả lỗi để người xử lý có đủ thông tin.")
-        else:
-            st.session_state.payroll_feedback.append({
-                "Kỳ lương": st.session_state.payroll_period,
-                "Nhân viên": feedback_employee,
-                "Phân loại": feedback_type,
-                "Mô tả": feedback_detail.strip(),
-                "Yêu cầu xử lý": expected_change.strip() or "Chưa nêu",
-                "Trạng thái": "Chờ xử lý",
-            })
-            st.success("Đã ghi nhận yêu cầu sửa.")
-    if st.session_state.payroll_feedback:
-        feedback_frame = pd.DataFrame(st.session_state.payroll_feedback)
-        st.dataframe(feedback_frame, hide_index=True, use_container_width=True)
-        st.download_button("Tải danh sách phản hồi", feedback_frame.to_csv(index=False).encode("utf-8-sig"),
-                           f"phan_hoi_payroll_{st.session_state.payroll_period}.csv", "text/csv")
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]): st.markdown(message["content"])
-
-guide = st.chat_input("Nhập hướng dẫn tính lương…")
-if guide:
-    st.session_state.messages.append({"role": "user", "content": guide})
+if policy_file and st.button("Đọc PDF và tạo bảng công thức", type="primary"):
     try:
-        candidate = formula_candidate_from_text(guide, [{"source": "hr_chat", "text": guide}])
-        st.session_state.formula_store = FormulaCandidateStore()
-        st.session_state.formula_store.save(candidate)
-        st.session_state.formula_candidate = candidate
-        st.session_state.formula_context = formula_context_from_text(DEFAULT_FIELD_CODES, candidate)
-        reply = "Đã tạo FormulaSpec nháp. Hãy validate, tạo review example, Accept và Activate trước khi tính lương."
-    except FormulaExtractionError as exc:
-        reply = f"Không trích xuất được công thức: {exc}"
-    st.session_state.messages.append({"role": "assistant", "content": reply})
-    st.rerun()
-
-st.subheader("1. Nguồn công thức")
-policy_file = st.file_uploader("Upload quy chế/hướng dẫn tính lương (PDF, DOCX hoặc TXT)", type=["pdf", "docx", "txt"])
-if policy_file and st.button("Trích xuất công thức từ tài liệu"):
-    try:
-        text, warnings, evidence = document_text(policy_file)
-        if not text: raise ValueError("Tài liệu không có văn bản trích xuất được; PDF scan cần OCR.")
-        candidate = formula_candidate_from_text(text, evidence)
-        st.session_state.formula_store = FormulaCandidateStore()
-        st.session_state.formula_store.save(candidate)
-        st.session_state.formula_candidate = candidate
-        st.session_state.formula_context = formula_context_from_text(DEFAULT_FIELD_CODES, candidate)
-        st.success("Đã tạo FormulaSpec nháp. Hãy review và Activate trước khi chạy payroll.")
+        text, warnings, evidence = parse_policy(policy_file)
+        if not text.strip():
+            raise ValueError("Không đọc được văn bản từ PDF. Với PDF scan, hãy kiểm tra OCR.")
+        set_formula_candidate(extract_formula(text, company_id, evidence))
+        st.session_state.policy_text = text
+        st.session_state.policy_evidence = evidence
+        st.session_state.formula_feedback = []
+        if warnings:
+            st.warning("\n".join(warnings))
+        st.success("Đã trích xuất công thức từ chính sách.")
     except (FormulaExtractionError, ValueError) as exc:
-        st.error(f"Không trích xuất được công thức: {exc}")
+        st.error(f"Không thể tạo công thức: {exc}")
     except Exception as exc:
-        st.error(f"Không thể đọc tài liệu: {exc}")
+        st.error(f"Không thể đọc PDF: {exc}")
 
 candidate = st.session_state.formula_candidate
-context = st.session_state.formula_context
-if candidate is not None and context is not None:
-    st.divider()
-    st.subheader("FormulaSpec review")
-    field_codes_text = st.text_area(
-        "Mã khoản tính được phép (cách nhau bằng dấu phẩy)", value=DEFAULT_FIELD_CODES,
-        help="FormulaSpec chỉ được Activate khi mọi output_field nằm trong danh mục này.", key="allowed_field_codes",
-    )
-    sample_json = st.text_area(
-        "Dữ liệu mẫu để review (JSON)", value="{}",
-        help="Nhập giá trị cho các biến không phải literal, ví dụ: {\"basic_salary\": 5000000, \"worked_days\": 26}.",
-        key="formula_review_values",
-    )
-    if st.button("Validate lại FormulaSpec"):
-        try:
-            st.session_state.formula_context = formula_context_from_text(field_codes_text, candidate)
-            st.rerun()
-        except ValueError as exc:
-            st.error(str(exc))
-    context = st.session_state.formula_context
-    validation = validate_formula(candidate, context)
-    if validation.passed:
-        st.success("FormulaSpec đã qua validation.")
-    else:
-        st.error("FormulaSpec chưa hợp lệ.")
-        st.write(list(validation.errors))
-    left, right = st.columns(2)
-    with left:
-        st.caption("FormulaSpec nháp")
-        st.code(json.dumps(asdict(candidate.proposed_spec), ensure_ascii=False, indent=2, default=str), language="json")
-    with right:
-        st.caption("Evidence")
-        st.json(candidate.source_evidence[:10])
-    if validation.passed and st.button("Tạo review example"):
-        try:
-            package = render_for_review(candidate, review_values(candidate, sample_json), context)
-            st.session_state.formula_store.save_review_package(package)
-            st.success("Đã tạo review example.")
-        except ValueError as exc:
-            st.error(f"Không thể tạo review example: {exc}")
-    package = st.session_state.formula_store.review_packages.get(candidate.candidate_id)
-    if package is not None:
-        st.subheader("Review examples")
-        st.json(list(package.rule_explanations))
-        reviewer = st.text_input("Người review", value="payroll-admin")
-        accept_col, activate_col = st.columns(2)
-        with accept_col:
-            if candidate.review_status is ReviewStatus.DRAFT and st.button("Accept FormulaSpec"):
-                try:
-                    review_formula(st.session_state.formula_store, candidate.candidate_id, ReviewStatus.ACCEPTED,
-                                   reviewer=reviewer, validation_context=context, note="Accepted in payroll app")
-                    st.rerun()
-                except ValueError as exc:
-                    st.error(f"Không thể Accept: {exc}")
-        with activate_col:
-            effective_date = st.date_input("Ngày hiệu lực", value=date.today())
-            if candidate.review_status is ReviewStatus.ACCEPTED and st.button("Activate FormulaSpec"):
-                try:
-                    active_spec = activate_formula_version(st.session_state.formula_store, candidate.candidate_id,
-                                                           context, effective_date=effective_date)
-                    active_formula = formula_to_engine_dict(active_spec)
-                    active_formula["status"] = "active"
-                    st.session_state.formula = active_formula
-                    st.success(f"Đã Activate FormulaSpec version {active_spec.version}.")
-                except ValueError as exc:
-                    st.error(f"Không thể Activate: {exc}")
-
-st.subheader("2. Một workbook Excel nhiều sheet")
-workbook_file = st.file_uploader("Upload workbook nguồn", type=["xlsx", "xlsm"])
-if not workbook_file:
-    st.info("Workbook có thể gồm sheet nhân viên, ca đêm, phép năm, thai sản, OT…; hãy upload để map từng sheet.")
+if candidate is None:
+    st.info("Upload PDF và bấm “Đọc PDF và tạo bảng công thức” để bắt đầu.")
     st.stop()
-data = file_bytes(workbook_file)
-try:
-    sheet_names = workbook_sheet_names(data)
-    with st.expander("Đặc trưng do Excel Parser trích xuất", expanded=True):
-        table_features, parser_warnings = excel_features(data, workbook_file.name)
-        st.dataframe(pd.DataFrame(table_features), hide_index=True, use_container_width=True)
-        if parser_warnings: st.warning("\n".join(parser_warnings))
-except Exception as exc:
-    st.error(f"Excel Parser không thể đọc workbook: {exc}"); st.stop()
 
-st.subheader("3. Mapping các sheet vào dữ liệu payroll")
-employee_sheet = st.selectbox("Sheet nhân viên/lương cơ bản", sheet_names)
-employee_header = st.number_input("Dòng header sheet nhân viên", 1, value=1)
-employee_frame = workbook_sheet(data, employee_sheet, int(employee_header))
-employee_columns = [str(value) for value in employee_frame.columns]
-st.dataframe(employee_frame.head(8), hide_index=True, use_container_width=True)
-employee_id = st.selectbox("Cột mã nhân viên của sheet nhân viên", employee_columns,
-                          index=employee_columns.index(suggest(employee_columns, ("mã nv", "ma nv", "employee_id"))) if suggest(employee_columns, ("mã nv", "ma nv", "employee_id")) in employee_columns else 0)
-formula_for_mapping = st.session_state.formula or (formula_to_engine_dict(candidate.proposed_spec) if candidate else default_formula("UPLOAD"))
-employee_map = suggested_field_mappings(employee_columns, employee_id, "employee", formula_required_codes(formula_for_mapping))
+if candidate.company_id != company_id:
+    st.warning("Mã công ty đã thay đổi. Hãy đọc lại PDF để tạo công thức cho mã công ty mới.")
+    st.stop()
 
-single_sheet = st.checkbox("Dùng sheet này cho cả dữ liệu nhân viên và payroll", value=True,
-                           help="Mỗi dòng là một nhân viên, có cả lương cơ bản, ngày công, OT... Bỏ chọn khi dữ liệu payroll nằm ở các sheet khác.")
-source_sheets: list[str] = []
-if not single_sheet:
-    source_sheets = st.multiselect("Các sheet cung cấp dữ liệu tính lương", [name for name in sheet_names if name != employee_sheet],
-                                   help="Ví dụ: Ca đêm, Phép năm, Thai sản, OT. Các trường cùng nhân viên sẽ được gộp.")
-attendance_raw: dict[str, pd.DataFrame] = {}
-attendance_specs: dict[str, dict[str, Any]] = {}
-for sheet in source_sheets:
-    with st.expander(f"Map sheet: {sheet}", expanded=True):
-        header = st.number_input(f"Dòng header — {sheet}", 1, value=1, key=f"header_{sheet}")
-        frame = workbook_sheet(data, sheet, int(header))
-        columns = [str(value) for value in frame.columns]
-        detected_id = suggest(columns, ("ma nv", "ma nhan vien", "employee id"))
-        if detected_id in columns:
-            columns = [detected_id, *[column for column in columns if column != detected_id]]
-        st.dataframe(frame.head(6), hide_index=True, use_container_width=True)
-        employee_column = st.selectbox(f"Cột mã nhân viên — {sheet}", columns, key=f"id_{sheet}")
-        attendance_raw[sheet] = frame
-        attendance_specs[sheet] = {"columns": suggested_field_mappings(columns, employee_column, f"field_{sheet}", formula_codes_for_source(formula_for_mapping, "attendance"))}
+context = validation_context(candidate)
+validation = validate_formula(candidate, context)
 
-if single_sheet:
-    active_formula = formula_for_mapping
-    source_sheets = [employee_sheet]
-    attendance_raw = {employee_sheet: employee_frame}
-    attendance_specs = {employee_sheet: {"columns": mapping_for_codes(
-        employee_map, formula_codes_for_source(active_formula, "attendance"))}}
+st.subheader("2. Kiểm tra bảng công thức")
+st.dataframe(display_dataframe(formula_table(candidate)), hide_index=True, use_container_width=True)
+st.caption("Bảng này cho biết rõ biến nào cần cột Excel, biến nào là hằng số lấy từ PDF.")
+st.dataframe(display_dataframe(formula_input_table(candidate)), hide_index=True, use_container_width=True)
 
-with st.expander("Cấu hình chạy payroll"):
-    company_id = st.text_input("Company ID", "UPLOAD")
-    period = st.text_input("Kỳ lương", "2025-05")
-    minimum_wage = st.number_input("Ngưỡng lương tối thiểu", min_value=0, value=3_500_000, step=100_000)
-    max_ot = st.number_input("Ngưỡng OT cảnh báo", min_value=0.0, value=200.0, step=1.0)
+with st.expander("Chỉnh trực tiếp công thức và hằng số", expanded=True):
+    st.caption(
+        "Nhập trực tiếp số ngày chuẩn, rate_config, tỷ lệ bảo hiểm…; không cần gửi "
+        "feedback cho AI. Có thể thêm/xóa dòng bằng nút ở cuối mỗi bảng. "
+        "Sau khi áp dụng, hệ thống sẽ kiểm tra công thức trước khi cho tính lương."
+    )
+    editor_key = f"{candidate.candidate_id}_{st.session_state.formula_editor_revision}"
+    edited_variables = st.data_editor(
+        editable_variable_table(candidate),
+        key=f"formula_variables_{editor_key}",
+        num_rows="dynamic",
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "name": st.column_config.TextColumn("Tên biến", required=True),
+            "source": st.column_config.SelectboxColumn(
+                "Nguồn", required=True,
+                options=["employee", "attendance", "rate_config", "regulatory", "literal"],
+            ),
+            "field_code": st.column_config.TextColumn("Mã dữ liệu / cấu hình"),
+            "value": st.column_config.NumberColumn("Giá trị cố định", format="%.6f"),
+            "description": st.column_config.TextColumn("Ghi chú"),
+        },
+    )
+    st.caption(
+        "Để dùng một giá trị áp dụng chung, chọn `literal` hoặc giữ `rate_config`/`regulatory` "
+        "và điền Giá trị cố định. Nếu điền Giá trị cố định cho biến đang lấy từ Excel, "
+        "hệ thống sẽ tự chuyển biến đó thành hằng số. Để trống để tiếp tục lấy từ Excel."
+    )
+    variables_to_delete = st.multiselect(
+        "Xóa biến đã chọn",
+        options=[str(row["name"]) for row in editor_records(edited_variables) if row.get("name")],
+        placeholder="Chọn một hoặc nhiều biến cần xóa",
+        key=f"delete_variables_{editor_key}",
+        help="Các biến được chọn sẽ bị xóa khi bấm “Áp dụng thay đổi trực tiếp” bên dưới.",
+    )
+    edited_rules = st.data_editor(
+        editable_rule_table(candidate),
+        key=f"formula_rules_{editor_key}",
+        num_rows="dynamic",
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "output_field": st.column_config.TextColumn("Mã khoản tính", required=True),
+            "expression": st.column_config.TextColumn("Công thức", required=True, width="large"),
+            "condition": st.column_config.TextColumn("Điều kiện"),
+            "rounding": st.column_config.TextColumn("Làm tròn, ví dụ round_down_1000"),
+            "section": st.column_config.SelectboxColumn(
+                "Nhóm", options=["", "line_items", "deductions", "employer_cost"],
+            ),
+            "description": st.column_config.TextColumn("Ghi chú"),
+        },
+    )
+    rules_to_delete = st.multiselect(
+        "Xóa khoản tính đã chọn",
+        options=[str(row["output_field"]) for row in editor_records(edited_rules) if row.get("output_field")],
+        placeholder="Chọn một hoặc nhiều khoản tính cần xóa",
+        key=f"delete_rules_{editor_key}",
+        help="Các khoản được chọn sẽ bị xóa khi bấm “Áp dụng thay đổi trực tiếp” bên dưới.",
+    )
+    if st.button("Áp dụng thay đổi trực tiếp", type="primary", key=f"apply_formula_{editor_key}"):
+        try:
+            variable_rows = [
+                row for row in editor_records(edited_variables)
+                if row.get("name") not in variables_to_delete
+            ]
+            rule_rows = [
+                row for row in editor_records(edited_rules)
+                if row.get("output_field") not in rules_to_delete
+            ]
+            set_formula_candidate(
+                apply_direct_formula_edits(
+                    candidate,
+                    variable_rows,
+                    rule_rows,
+                )
+            )
+            st.rerun()
+        except (DirectFormulaEditError, ValueError) as exc:
+            st.error(f"Không thể áp dụng thay đổi: {exc}")
 
-formula = st.session_state.formula
-if formula is not None:
-    with st.expander("FormulaSpec sẽ chạy", expanded=True):
-        show_formula_summary(formula)
+with st.expander("Thiếu cột hoặc cần sửa công thức?", expanded=False):
+    st.caption("Ví dụ: “Bổ sung phụ cấp xăng xe từ cột Phụ cấp xăng xe của Excel” hoặc “OT ngày lễ là 300%”.")
+    feedback = st.text_area("Yêu cầu của HR", key="formula_feedback_text")
+    if st.button("Gửi feedback và tạo lại công thức", type="secondary"):
+        if not feedback.strip():
+            st.error("Hãy nhập nội dung cần bổ sung hoặc sửa.")
+        elif not st.session_state.policy_text:
+            st.error("Không còn nội dung PDF trong phiên này. Hãy upload và đọc lại PDF.")
+        else:
+            try:
+                st.session_state.formula_feedback.append(feedback.strip())
+                instruction = (
+                    "\n\nYÊU CẦU BỔ SUNG/SỬA TỪ HR (phải phản ánh vào FormulaSpec):\n"
+                    + "\n".join(f"- {item}" for item in st.session_state.formula_feedback)
+                )
+                set_formula_candidate(extract_formula(
+                    st.session_state.policy_text + instruction,
+                    company_id,
+                    st.session_state.policy_evidence,
+                ))
+                st.rerun()
+            except (FormulaExtractionError, ValueError) as exc:
+                st.error(f"Không thể cập nhật công thức: {exc}")
+
+if validation.passed:
+    st.success("Bảng công thức hợp lệ về cấu trúc và có thể dùng để tính lương.")
 else:
-    st.warning("Cần Activate một FormulaSpec đã được review trước khi tính lương.")
-st.caption("Tên trường chuẩn trong mapping phải khớp `field_code` của FormulaSpec. Ví dụ: map ‘Giờ ca đêm’ thành `night_shift_hours` nếu công thức dùng field này.")
+    st.error("Bảng công thức chưa hợp lệ; chưa thể tính lương.")
+    st.write(list(validation.errors))
+    st.stop()
+if validation.warnings:
+    st.warning("\n".join(validation.warnings))
 
-if st.button("Xác nhận công thức & tính lương", type="primary"):
-    if formula is None:
-        st.error("FormulaSpec chưa được Activate."); st.stop()
-    if not source_sheets:
-        st.error("Chọn ít nhất một sheet nguồn (chấm công/ca đêm/phép/thai sản/OT)."); st.stop()
+st.subheader("3. File Excel")
+excel_file = st.file_uploader("Upload file Excel lương/chấm công", type=["xlsx", "xlsm"])
+if excel_file is None:
+    st.info("Excel cần có một sheet chứa mã nhân viên và các cột đầu vào được nêu trong công thức.")
+    st.stop()
+
+excel_data = uploaded_bytes(excel_file)
+try:
+    sheet_names = list(pd.ExcelFile(BytesIO(excel_data)).sheet_names)
+except Exception as exc:
+    st.error(f"Không thể đọc file Excel: {exc}")
+    st.stop()
+
+selected_sheet = st.selectbox("Sheet dữ liệu", sheet_names)
+try:
+    preview = raw_excel_preview(excel_data, selected_sheet)
+    st.caption("Xem trước 20 dòng đầu. Chọn số ở cột “Dòng Excel” làm dòng header.")
+    st.dataframe(display_dataframe(preview), use_container_width=True)
+except Exception as exc:
+    st.error(f"Không thể xem trước sheet: {exc}")
+    st.stop()
+
+header_row = st.number_input(
+    "Dòng chứa tên cột (header)", min_value=1, value=1, step=1
+)
+data_start_row = st.number_input(
+    "Dòng bắt đầu dữ liệu thật (bỏ các dòng rác/phụ đề ngay dưới header nếu có)",
+    min_value=int(header_row) + 1,
+    value=int(header_row) + 1,
+    step=1,
+    help="Ví dụ: header ở dòng 4 nhưng dòng 5, 6 là dòng rác thì đặt số này là 7.",
+)
+
+try:
+    frame = read_excel_sheet(excel_data, selected_sheet, int(header_row), int(data_start_row))
+except Exception as exc:
+    st.error(f"Không thể đọc sheet với dòng header đã chọn: {exc}")
+    st.stop()
+
+columns = [str(column) for column in frame.columns]
+if not columns:
+    st.error("Dòng header đã chọn không có cột nào. Hãy chọn lại dòng header.")
+    st.stop()
+detected_employee_id = find_employee_id_column(columns)
+if detected_employee_id is None:
+    st.warning("Chưa tự nhận diện được cột mã nhân viên. Hãy chọn đúng cột bên dưới.")
+    default_employee_index = 0
+else:
+    default_employee_index = columns.index(detected_employee_id)
+employee_id_column = st.selectbox("Cột mã nhân viên", columns, index=default_employee_index)
+st.caption(f"Cột “{employee_id_column}” sẽ được chuẩn hóa thành `employee_id`.")
+
+formula = prepare_formula_for_excel(formula_to_engine_dict(candidate.proposed_spec))
+employee_mapping, missing_employee = suggest_formula_column_mapping(
+    columns, formula_inputs(formula, "employee"), source="employee"
+)
+attendance_mapping, missing_attendance = suggest_formula_column_mapping(
+    columns, formula_inputs(formula, "attendance"), source="attendance"
+)
+
+# Header matching is intentionally conservative.  Let HR explicitly select a
+# source column when the business label is company-specific instead of forcing
+# them to rename their workbook or silently guessing a payroll input.
+manual_choices = ["— Chưa có cột tương ứng —", *[column for column in columns if column != employee_id_column]]
+missing_by_source = [("employee", field_code) for field_code in missing_employee]
+missing_by_source.extend(("attendance", field_code) for field_code in missing_attendance)
+if missing_by_source:
+    st.info("Một số trường trong công thức chưa được nhận diện tự động. Bạn có thể map thủ công nếu cột Excel có tên nội bộ.")
+    for source, field_code in missing_by_source:
+        selected_column = st.selectbox(
+            f"Cột Excel cho `{field_code}` ({'Hồ sơ nhân viên' if source == 'employee' else 'Chấm công'})",
+            manual_choices,
+            key=f"manual_mapping_{source}_{field_code}",
+        )
+        if selected_column == manual_choices[0]:
+            continue
+        if source == "employee":
+            employee_mapping[field_code] = selected_column
+        else:
+            attendance_mapping[field_code] = selected_column
+
+missing_employee = [field_code for field_code in missing_employee if field_code not in employee_mapping]
+missing_attendance = [field_code for field_code in missing_attendance if field_code not in attendance_mapping]
+missing = list(dict.fromkeys([*missing_employee, *missing_attendance]))
+
+st.subheader("4. Cột Excel đã được chuẩn hóa tự động")
+st.caption(f"Cột mã nhân viên: {employee_id_column}")
+mapping_preview = pd.DataFrame(
+    [
+        *mapping_rows(employee_mapping, "Hồ sơ nhân viên"),
+        *mapping_rows(attendance_mapping, "Chấm công"),
+    ]
+)
+if not mapping_preview.empty:
+    st.dataframe(display_dataframe(mapping_preview), hide_index=True, use_container_width=True)
+
+if missing:
+    st.error("Excel chưa có đủ cột cho công thức: " + ", ".join(missing))
+    suggestions = pd.DataFrame(
+        [
+            {
+                "Cột Excel hiện có": column,
+                "Hệ thống nhận diện là": suggested_field_code(column),
+            }
+            for column in columns
+            if column != employee_id_column
+        ]
+    )
+    st.dataframe(display_dataframe(suggestions), hide_index=True, use_container_width=True)
+    st.info(
+        "Cách sửa: đổi tên header Excel cho khớp mã thiếu (ví dụ “Lương cơ bản”, "
+        "“Ngày công chuẩn”, “Ngày công thực tế”), rồi tải lại file. "
+        "Các alias phổ biến đã được tự map; field riêng cần có header cùng tên với field_code trong công thức."
+    )
+    if st.button("Tạo lại công thức chỉ dùng dữ liệu Excel hiện có", type="secondary"):
+        if not st.session_state.policy_text:
+            st.error("Không còn nội dung PDF trong phiên này. Hãy upload và đọc lại PDF.")
+        else:
+            available_columns = "\n".join(
+                f"- {column} (gợi ý mã: {suggested_field_code(column)})"
+                for column in columns
+                if column != employee_id_column
+            )
+            instruction = (
+                "\n\nRÀNG BUỘC WORKBOOK: Chỉ dùng biến employee/attendance khi map được vào một trong các cột "
+                "Excel sau. Nếu chính sách cần dữ liệu không có trong danh sách, bỏ quy tắc phụ thuộc vào dữ liệu đó "
+                "thay vì tạo biến giả định.\n"
+                + available_columns
+            )
+            try:
+                set_formula_candidate(extract_formula(
+                    st.session_state.policy_text + instruction,
+                    company_id,
+                    st.session_state.policy_evidence,
+                ))
+                st.success("Đã tạo lại công thức theo các cột Excel hiện có.")
+                st.rerun()
+            except (FormulaExtractionError, ValueError) as exc:
+                st.error(f"Không thể tạo lại công thức: {exc}")
+else:
+    st.success("Đã map đủ các cột mà công thức cần.")
+
+st.dataframe(display_dataframe(frame.head(10)), hide_index=True, use_container_width=True)
+
+if st.button(
+    "Tính lương",
+    type="primary",
+    disabled=bool(missing),
+    help="Bổ sung hoặc map các cột còn thiếu trước khi tính lương." if missing else "Tính lương theo công thức đã kiểm tra.",
+):
+    employee_columns = {employee_id_column: "employee_id", **{column: code for code, column in employee_mapping.items()}}
+    attendance_columns = {employee_id_column: "employee_id", **{column: code for code, column in attendance_mapping.items()}}
     try:
-        employees, company = normalize_salary_schema({employee_sheet: employee_frame}, SheetMappingSpec(company_id, "salary_schema", {employee_sheet: {"columns": employee_map}}))
-        records = normalize_attendance(attendance_raw, SheetMappingSpec(company_id, "attendance", attendance_specs), period)
-        validation = validate_ingested_data(employees, records, period)
-        if not validation.passed:
-            st.error("Dữ liệu không hợp lệ: " + validation_message(validation)); st.stop()
-        if not validation.passed: st.error("Dữ liệu không hợp lệ: " + " | ".join(validation.errors)); st.stop()
-        by_id = {item.employee_id: item for item in records}; results, failures = [], []
-        st.session_state.payroll_results = results
-        st.session_state.payroll_failures = failures
-        st.session_state.payroll_period = period
+        employees, company = normalize_salary_schema(
+            {selected_sheet: frame},
+            SheetMappingSpec(company_id, "salary_schema", {selected_sheet: {"columns": employee_columns}}),
+        )
+        attendance = normalize_attendance(
+            {selected_sheet: frame},
+            SheetMappingSpec(company_id, "attendance", {selected_sheet: {"columns": attendance_columns}}),
+            period,
+        )
+        data_validation = validate_ingested_data(employees, attendance, period)
+        if not data_validation.passed:
+            raise ValueError(" | ".join(data_validation.errors))
+
         active_formula = {**formula, "company_id": company_id, "status": "active"}
-        company_data = {**company.to_dict(), "minimum_wage": minimum_wage, "max_ot_hours": max_ot}
-        for employee in employees:
-            record = by_id.get(employee.employee_id)
-            if not record: failures.append(f"{employee.employee_id}: không có dữ liệu ở các sheet nguồn"); continue
-            try: results.append(run_payroll(employee, record, company_data, active_formula))
-            except (ValueError, ZeroDivisionError) as exc: failures.append(f"{employee.employee_id}: {exc}")
-        if not results: st.error("Không thể tính nhân viên nào. " + " | ".join(failures)); st.stop()
+        attendance_by_employee = {record.employee_id: record for record in attendance}
+        results = [
+            run_payroll(employee, attendance_by_employee[employee.employee_id], company.to_dict(), active_formula)
+            for employee in employees
+            if employee.employee_id in attendance_by_employee
+        ]
+        if not results:
+            raise ValueError("Không có nhân viên hợp lệ để tính lương.")
+        output = result_table(results)
+        st.success(f"Đã tính lương cho {len(results)} nhân viên.")
+        st.dataframe(display_dataframe(output), hide_index=True, use_container_width=True)
+        st.download_button(
+            "Tải kết quả CSV",
+            output.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"bang_luong_{period}.csv",
+            mime="text/csv",
+        )
+        if data_validation.warnings:
+            st.warning("\n".join(data_validation.warnings))
     except Exception as exc:
-        st.error(f"Không thể chạy payroll: {exc}"); st.stop()
-    summary = [{"Mã nhân viên": item.employee_id, "Gross": item.gross_salary, "Net": item.net_salary,
-                "Publish": "Được phép" if can_publish(item) else "Chờ review", "Anomaly": ", ".join(flag.code for flag in item.anomaly_flags)} for item in results]
-    all_flags = [{"Mã nhân viên": item.employee_id, **flag.to_dict()} for item in results for flag in item.anomaly_flags]
-    st.subheader("Kết quả"); st.dataframe(pd.DataFrame(summary), hide_index=True, use_container_width=True)
-    if all_flags: st.error("Có anomaly: các kết quả tương ứng bị chặn publish."); st.dataframe(pd.DataFrame(all_flags), hide_index=True, use_container_width=True)
-    else: st.success("Không phát hiện anomaly.")
-    if failures: st.warning("Không tính được: " + " | ".join(failures))
-    st.download_button("Tải file Excel lương final", final_excel(results), f"bang_luong_{period}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.error(f"Không thể tính lương: {exc}")
