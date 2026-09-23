@@ -14,11 +14,7 @@ import pandas as pd
 import streamlit as st
 
 from payroll.engine import run_payroll
-from payroll.field_catalog import (
-    normalize_field_label,
-    suggest_formula_column_mapping,
-    suggested_field_code,
-)
+
 from payroll.formula import FormulaExtractionError, ValidationContext, extract_formula, formula_to_engine_dict, validate_formula
 from payroll.formula.direct_editor import DirectFormulaEditError, apply_direct_formula_edits
 from payroll.ingestion import SheetMappingSpec, normalize_attendance, normalize_salary_schema, read_payroll_sheet, validate_ingested_data
