@@ -24,6 +24,10 @@ import ast
 import operator
 from typing import Any, Callable
 
+# Shared, single-source-of-truth implementations (see note below _ALLOWED_FUNCS
+# for why these are no longer redefined in this module).
+from ..builtin_functions import prorate, round_down, tax_bracket_vn
+
 # formula_schema.FormulaSpec is expected to look like the object built in
 # formula_extractor.py: spec.variables (name, source, value) and
 # spec.rules (output_field, expression, condition, rounding, section, description).
@@ -40,38 +44,6 @@ class UnsafeExpressionError(ValueError):
 # ---------------------------------------------------------------------------
 # Whitelisted domain functions (same names the extraction prompt allows)
 # ---------------------------------------------------------------------------
-
-def prorate(base: float, worked_units: float, total_units: float) -> float:
-    """Pro-rate `base` by worked_units / total_units. Returns 0 if total_units is 0."""
-    if not total_units:
-        return 0.0
-    return base * worked_units / total_units
-
-
-def round_down(value: float, unit: float = 1) -> float:
-    """Round `value` down to the nearest multiple of `unit` (unit must be > 0)."""
-    if unit <= 0:
-        raise ValueError("round_down: unit must be positive")
-    return (value // unit) * unit
-
-
-def tax_bracket_vn(income: float, brackets: list[tuple[float | None, float]]) -> float:
-    """
-    Progressive tax, Vietnam-style bracket table.
-    brackets: list of (upper_bound, rate) sorted ascending; last upper_bound may be None
-              (open-ended top bracket). Example:
-              [(5_000_000, 0.05), (10_000_000, 0.10), (None, 0.15)]
-    """
-    tax = 0.0
-    lower = 0.0
-    for upper, rate in brackets:
-        if upper is None or income <= upper:
-            tax += max(income - lower, 0.0) * rate
-            return round(tax)
-        tax += max(upper - lower, 0.0) * rate
-        lower = upper
-    return round(tax)
-
 
 _ALLOWED_FUNCS: dict[str, Callable[..., Any]] = {
     "prorate": prorate,
@@ -94,7 +66,6 @@ _CMPOPS = {
     ast.GtE: operator.ge, ast.Eq: operator.eq, ast.NotEq: operator.ne,
     ast.In: operator.contains, ast.NotIn: lambda values, value: not operator.contains(values, value),
 }
-
 
 def _eval_node(node: ast.AST, env: dict[str, Any]) -> Any:
     if isinstance(node, ast.Expression):
@@ -152,6 +123,28 @@ def safe_eval(expression: str, env: dict[str, Any]) -> Any:
     tree = ast.parse(expression, mode="eval")
     return _eval_node(tree, env)
 
+
+def _apply_rule_rounding(value: float, rounding: str | None) -> float:
+    """Apply a FormulaRule.rounding keyword to `value`.
+
+    `rounding` is a short keyword string -- "round", "round_down", or
+    "round_down_<positive unit>" (e.g. "round_down_1000") -- exactly the
+    format `formula_validator._validate_rounding` enforces and the extraction
+    prompt in formula_extractor.py instructs the LLM to produce. It is a
+    keyword, not an expression: it must NOT be passed to safe_eval(), which
+    would parse e.g. "round_down_1000" as an (undefined) variable name and
+    raise UnsafeExpressionError.
+    """
+    if rounding is None:
+        return value
+    if rounding == "round":
+        return round(value)
+    if rounding == "round_down":
+        return round_down(value)
+    prefix = "round_down_"
+    if rounding.startswith(prefix):
+        return round_down(value, float(rounding[len(prefix):]))
+    raise UnsafeExpressionError(f"unsupported rounding rule: {rounding!r}")
 
 def summarize_by_section(spec: "FormulaSpec", outputs: dict[str, Any]) -> dict[str, Any]:
     """
@@ -214,8 +207,7 @@ def compile_formula(spec: "FormulaSpec") -> Callable[[dict[str, Any]], dict[str,
             if rule.condition and not safe_eval(rule.condition, scope):
                 continue
             value = safe_eval(rule.expression, scope)
-            if rule.rounding:
-                value = safe_eval(rule.rounding, {**scope, "value": value})
+            value = _apply_rule_rounding(value, rule.rounding)
             outputs[rule.output_field] = value
 
         return outputs

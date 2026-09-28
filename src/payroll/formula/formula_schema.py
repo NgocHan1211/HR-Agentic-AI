@@ -56,10 +56,10 @@ class DayType(str, Enum):
     HOLIDAY = "Holiday"
 
 
-# Rates represented by the shared payroll data contract.  Payroll exports in
-# use contain both the 250%/350% and 270%/390% night-work conventions; their
+# Rates represented by the shared payroll data contract.  270% and 390% are
+# combined night/rest and night/holiday rates found in the policy sample; their
 # final use still requires validation and human approval for each company.
-ALLOWED_OT_RATES = frozenset({1.5, 2.0, 2.5, 2.7, 3.0, 3.5, 3.9})
+ALLOWED_OT_RATES = frozenset({1.5, 2.0, 2.7, 3.0, 3.9})
 
 # Which catalog categories represent income vs. deductions, for NET-consistency checks.
 # WORKDAY is deliberately excluded: it holds both plain attendance inputs (not part of

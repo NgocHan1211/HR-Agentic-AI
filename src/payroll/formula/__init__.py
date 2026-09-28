@@ -49,6 +49,7 @@ from .formula_extractor import (
     OpenRouterCompletionClient,
     extract_formula,
     formula_to_engine_dict,
+    repair_formula,
 )
 
 # --- validation: static checks (whitelisted grammar, NET consistency, cycles) ---
@@ -103,6 +104,7 @@ __all__ = [
     "OpenRouterCompletionClient",
     "extract_formula",
     "formula_to_engine_dict",
+    "repair_formula",
     # validation
     "ValidationContext",
     "ValidationResult",

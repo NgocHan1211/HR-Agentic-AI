@@ -67,6 +67,7 @@ def review_formula(store: FormulaCandidateStore, candidate_id: str, decision: Re
     if decision is ReviewStatus.ACCEPTED:
         validation: ValidationResult = validate_formula(candidate, validation_context)
         if not validation.passed: raise ValueError(f"cannot accept invalid candidate: {list(validation.errors)}")
+        if candidate_id not in store.review_packages: raise ValueError("render and persist a ReviewPackage before accepting")
     previous_status = candidate.review_status
     candidate.review_status = decision
     candidate.review_history.append({"from_status": previous_status.value, "decision": decision.value, "reviewer": reviewer, "note": note, "evidence_ref": evidence_ref, "at": datetime.now(timezone.utc).isoformat()})
@@ -96,7 +97,10 @@ def _ordered_rules(rules: tuple[FormulaRule, ...]) -> list[FormulaRule]:
 
 def _names(expression: str) -> set[str]:
     import ast
+
+    expression = expression.strip()
     if not expression:
         return set()
+
     tree = ast.parse(expression, mode="eval")
     return {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
