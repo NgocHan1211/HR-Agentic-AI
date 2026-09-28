@@ -528,21 +528,63 @@ class GemmaAPICompletionClient:
         self._retry_base_delay_seconds = retry_base_delay_seconds
 
     def complete(self, *, system: str, user: str) -> str:
+        text, _ = self._generate(system=system, user=user)
+        return text
+
+    def complete_structured(
+        self, *, system: str, user: str, schema: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Generate JSON constrained by Google's JSON-Schema response mode.
+
+        ``complete`` remains available for the existing formula-extraction flow.
+        New agentic flows should use this method and validate the decoded value again
+        with their Pydantic contract before taking any action.
+        """
+        text, payload = self._generate(system=system, user=user, response_schema=schema)
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Gemma returned invalid JSON despite structured output mode") from exc
+        if not isinstance(value, dict):
+            raise RuntimeError("Gemma structured output must be a JSON object")
+        usage = payload.get("usageMetadata") or {}
+        return value, {
+            "model": self._model,
+            "input_tokens": int(usage.get("promptTokenCount", 0)),
+            "output_tokens": int(usage.get("candidatesTokenCount", 0)),
+            "total_tokens": int(
+                usage.get("totalTokenCount", int(usage.get("promptTokenCount", 0)) + int(usage.get("candidatesTokenCount", 0)))
+            ),
+            "latency_ms": payload.get("_agent_latency_ms"),
+            "raw_usage": usage,
+        }
+
+    def _generate(
+        self, *, system: str, user: str, response_schema: dict[str, Any] | None = None
+    ) -> tuple[str, dict[str, Any]]:
         url = f"{self._api_url}/models/{self._model}:generateContent"
+        generation_config: dict[str, Any] = {"temperature": 0, "responseMimeType": "application/json"}
+        if response_schema is not None:
+            # Google's GenerateContent API supports a documented subset of JSON
+            # Schema under responseJsonSchema.  It constrains output shape; domain
+            # validation still happens in the caller before an action is permitted.
+            generation_config["responseJsonSchema"] = response_schema
         body = {
             # Gemini REST JSON uses camelCase, not the Python SDK's snake_case.
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": user}]}],
-            "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
+            "generationConfig": generation_config,
         }
         request = urllib.request.Request(
             url, data=json.dumps(body).encode("utf-8"),
             headers={"Content-Type": "application/json", "x-goog-api-key": self._api_key}, method="POST",
         )
+        started_at = time.monotonic()
         payload = self._request_with_retry(request)
+        payload["_agent_latency_ms"] = int((time.monotonic() - started_at) * 1000)
         try:
             parts = payload["candidates"][0]["content"]["parts"]
-            return "".join(part.get("text", "") for part in parts)
+            return "".join(part.get("text", "") for part in parts), payload
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(f"unexpected Gemma API response shape: {payload!r}") from exc
 

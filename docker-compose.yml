@@ -1,4 +1,21 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: hr-agent-postgres
+    environment:
+      POSTGRES_DB: hr_agent
+      POSTGRES_USER: hr_agent
+      POSTGRES_PASSWORD: hr_agent_dev_only
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_storage:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hr_agent -d hr_agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   qdrant:
     image: qdrant/qdrant:v1.19.0
     container_name: qdrant
@@ -6,3 +23,6 @@ services:
       - "6333:6333"
     volumes:
       - ./qdrant_storage:/qdrant/storage
+
+volumes:
+  postgres_storage:

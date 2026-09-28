@@ -10,6 +10,8 @@ openai
 fastapi
 sqlalchemy
 pydantic
+psycopg[binary]
+uvicorn[standard]
 
 # Tests
 pytest

@@ -115,3 +115,123 @@ class UpdateOperationORM(Base):
     precondition: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 
     change_item: Mapped[ChangeItemORM] = relationship(back_populates="operations")
+
+
+# Agentic case tables share this Base with the existing policy-update tables.  A
+# Case can point to a ChangeSet, but does not use ChangeSet's detailed state
+# machine: its user-facing lifecycle is intentionally only RECEIVED → REVIEW →
+# APPROVED/REJECTED → DONE.
+class AgentCaseORM(Base):
+    __tablename__ = "agent_cases"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('RECEIVED', 'REVIEW', 'APPROVED', 'REJECTED', 'DONE')",
+            name="ck_agent_case_status",
+        ),
+        Index("ix_agent_case_status_updated", "status", "updated_at"),
+    )
+
+    case_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    changeset_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    requester_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    brief: Mapped[str] = mapped_column(String(8000), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="RECEIVED")
+    approved_plan_version: Mapped[int | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+    plans: Mapped[list["AgentPlanORM"]] = relationship(back_populates="case", cascade="all, delete-orphan")
+    runs: Mapped[list["AgentRunORM"]] = relationship(back_populates="case", cascade="all, delete-orphan")
+    events: Mapped[list["AgentCaseEventORM"]] = relationship(back_populates="case", cascade="all, delete-orphan")
+    messages: Mapped[list["AgentMessageORM"]] = relationship(back_populates="case", cascade="all, delete-orphan")
+
+
+class AgentMessageORM(Base):
+    __tablename__ = "agent_messages"
+    __table_args__ = (
+        CheckConstraint("role IN ('user', 'assistant', 'system')", name="ck_agent_message_role"),
+        Index("ix_agent_message_case_created", "case_id", "created_at"),
+    )
+
+    message_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    case_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_cases.case_id"), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(String(8000), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    case: Mapped[AgentCaseORM] = relationship(back_populates="messages")
+
+
+class AgentPlanORM(Base):
+    __tablename__ = "agent_plans"
+    __table_args__ = (
+        UniqueConstraint("case_id", "version", name="uq_agent_plan_case_version"),
+        Index("ix_agent_plan_case_status", "case_id", "status"),
+    )
+
+    plan_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    case_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_cases.case_id"), nullable=False)
+    version: Mapped[int] = mapped_column(nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="DRAFT")
+    proposal: Mapped[dict] = mapped_column(JSON, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    decision_note: Mapped[str | None] = mapped_column(String(4000), nullable=True)
+
+    case: Mapped[AgentCaseORM] = relationship(back_populates="plans")
+    runs: Mapped[list["AgentRunORM"]] = relationship(back_populates="plan")
+
+
+class AgentRunORM(Base):
+    __tablename__ = "agent_runs"
+    __table_args__ = (Index("ix_agent_run_case_status", "case_id", "status"),)
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    case_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_cases.case_id"), nullable=False)
+    plan_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_plans.plan_id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="PENDING")
+    max_steps: Mapped[int] = mapped_column(nullable=False, default=10)
+    completed_step_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    stop_reason: Mapped[str | None] = mapped_column(String(4000), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    case: Mapped[AgentCaseORM] = relationship(back_populates="runs")
+    plan: Mapped[AgentPlanORM] = relationship(back_populates="runs")
+
+
+class AgentCaseEventORM(Base):
+    __tablename__ = "agent_case_events"
+    __table_args__ = (Index("ix_agent_case_event_case_created", "case_id", "created_at"),)
+
+    event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    case_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_cases.case_id"), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    case: Mapped[AgentCaseORM] = relationship(back_populates="events")
+
+
+class TokenUsageORM(Base):
+    __tablename__ = "agent_token_usage"
+    __table_args__ = (
+        CheckConstraint("input_tokens >= 0 AND output_tokens >= 0 AND total_tokens >= 0", name="ck_agent_token_nonnegative"),
+        Index("ix_agent_token_usage_case_recorded", "case_id", "recorded_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    case_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_cases.case_id"), nullable=False)
+    run_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("agent_runs.run_id"), nullable=True)
+    model: Mapped[str] = mapped_column(String(128), nullable=False)
+    phase: Mapped[str] = mapped_column(String(32), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(nullable=False)
+    output_tokens: Mapped[int] = mapped_column(nullable=False)
+    total_tokens: Mapped[int] = mapped_column(nullable=False)
+    tool_calls: Mapped[int] = mapped_column(nullable=False, default=0)
+    latency_ms: Mapped[int | None] = mapped_column(nullable=True)
+    estimated_cost_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

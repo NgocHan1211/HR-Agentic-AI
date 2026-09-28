@@ -33,6 +33,21 @@ def test_gemma_client_uses_supported_default_model_and_api_key_header():
     assert request_body["systemInstruction"]["parts"][0]["text"] == "system"
 
 
+def test_gemma_client_sends_json_schema_for_structured_output():
+    client = GemmaAPICompletionClient(api_key="test-key")
+    with patch("urllib.request.urlopen", return_value=_Response()) as urlopen:
+        payload, usage = client.complete_structured(
+            system="system", user="user",
+            schema={"type": "object", "properties": {"decision": {"type": "string"}}, "required": ["decision"]},
+        )
+
+    assert payload == {}
+    assert usage["model"] == "gemma-4-31b-it"
+    request_body = json.loads(urlopen.call_args.args[0].data.decode())
+    assert request_body["generationConfig"]["responseMimeType"] == "application/json"
+    assert request_body["generationConfig"]["responseJsonSchema"]["required"] == ["decision"]
+
+
 def test_openrouter_client_uses_free_router_and_bearer_key():
     client = OpenRouterCompletionClient(api_key="test-key")
     with patch("urllib.request.urlopen", return_value=_OpenRouterResponse()) as urlopen:
