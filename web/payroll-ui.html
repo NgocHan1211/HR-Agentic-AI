@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tính lương từ chính sách</title>
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#eef1ee;--surf:#fff;--ink:#14231f;--mut:#5d6b66;--line:#d5dcd8;--acc:#0f6b5c;--onacc:#fff;--acc2:#e3f1ee;--warn:#8a5610;--warnbg:#fbf0dc;--bad:#b3261e;--badbg:#fbe4e2;--ok:#1d6b3a;--okbg:#e0f2e6;--r:8px}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1715;--surf:#17211e;--ink:#e6eeea;--mut:#9aaba5;--line:#2b3a36;--acc:#4fc3ad;--onacc:#07211c;--acc2:#16322d;--warn:#e7b25c;--warnbg:#35290f;--bad:#f2867f;--badbg:#3a1a18;--ok:#76d49a;--okbg:#143322}}
+*{box-sizing:border-box}html,body{margin:0}
+body{font:15px/1.55 "Be Vietnam Pro",system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--ink)}
+button,input,select,textarea{font:inherit;color:inherit}
+header{background:var(--surf);border-bottom:1px solid var(--line);padding:14px 28px;display:flex;gap:16px;align-items:end;flex-wrap:wrap;position:sticky;top:0;z-index:5}
+header h1{font-size:18px;margin:0 auto 0 0;align-self:center}
+header div{min-width:150px}
+header label{margin:0 0 3px}
+main{max-width:1100px;margin:0 auto;padding:22px 20px 80px}
+section{background:var(--surf);border:1px solid var(--line);border-radius:var(--r);margin-bottom:16px}
+section>h2{margin:0;padding:14px 18px;font-size:16px;display:flex;gap:10px;align-items:center;cursor:default}
+section>h2 i{font-style:normal;width:26px;height:26px;border-radius:50%;background:var(--bg);display:grid;place-items:center;font-size:13px;border:1px solid var(--line)}
+section.done>h2 i{background:var(--acc);color:var(--onacc);border-color:var(--acc)}
+section.lock{opacity:.55}
+.body{padding:2px 18px 18px}
+label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px}
+input,select,textarea{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:var(--r);background:var(--bg)}
+td input,td select{padding:5px 7px;min-width:90px}
+textarea{min-height:76px;resize:vertical}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.btn{background:var(--acc);color:var(--onacc);border:0;border-radius:var(--r);padding:9px 16px;font-weight:600;cursor:pointer}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.ghost{background:none;color:var(--ink);border:1px solid var(--line)}
+.btn.sm{padding:4px 10px;font-size:13px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.scroll{overflow:auto;max-height:440px;border:1px solid var(--line);border-radius:var(--r)}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th,td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:nowrap}
+th{position:sticky;top:0;background:var(--surf);color:var(--mut);font-weight:600;font-size:12.5px}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+tr.click{cursor:pointer}tr.click:hover{background:var(--acc2)}
+.msg{padding:10px 12px;border-radius:var(--r);margin:12px 0 0;font-size:14px}
+.msg.ok{background:var(--okbg);color:var(--ok)}.msg.bad{background:var(--badbg);color:var(--bad)}.msg.warn{background:var(--warnbg);color:var(--warn)}.msg.info{background:var(--acc2);color:var(--acc)}
+.msg ul{margin:4px 0 0;padding-left:18px}
+.hint{color:var(--mut);font-size:13px;margin:6px 0}
+h3{font-size:14px;margin:18px 0 6px}
+.tag{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;font-weight:600;background:var(--badbg);color:var(--bad)}
+.tag.ok{background:var(--okbg);color:var(--ok)}
+.stats{display:flex;gap:12px;flex-wrap:wrap;margin:12px 0}
+.stats div{flex:1;min-width:150px;background:var(--bg);border:1px solid var(--line);border-radius:var(--r);padding:10px 14px}
+.stats b{display:block;font-size:19px;font-variant-numeric:tabular-nums}.stats span{color:var(--mut);font-size:13px}
+dialog{border:1px solid var(--line);border-radius:var(--r);background:var(--surf);color:var(--ink);width:min(520px,94vw);padding:18px}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+#toast{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:9}
+#toast div{background:var(--ink);color:var(--bg);padding:10px 14px;border-radius:var(--r);max-width:380px;font-size:13.5px}
+#toast div.bad{background:var(--bad);color:#fff}
+.spin{display:inline-block;width:13px;height:13px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:s .7s linear infinite;vertical-align:-2px;margin-right:6px}
+@keyframes s{to{transform:rotate(360deg)}}
+@media(max-width:700px){.g2{grid-template-columns:1fr}header{padding:12px}}
+@media(prefers-reduced-motion:reduce){.spin{animation:none}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Tính lương từ chính sách</h1>
+  <div><label for="company">Mã công ty</label><input id="company" value="UPLOAD"></div>
+  <div><label for="period">Kỳ lương</label><input id="period" value="2025-05"></div>
+  <div style="min-width:230px"><label for="base">Địa chỉ backend</label><input id="base" value="http://localhost:8000"></div>
+</header>
+<main>
+  <section id="s1"><h2><i>1</i>Chính sách lương</h2><div class="body">
+    <label for="pf">File chính sách (PDF, DOCX hoặc TXT)</label>
+    <input id="pf" type="file" accept=".pdf,.docx,.txt">
+    <div class="row"><button class="btn" id="b1">Đọc chính sách và tạo bảng công thức</button></div>
+    <div id="o1"></div>
+  </div></section>
+
+  <section id="s2" class="lock"><h2><i>2</i>Kiểm tra công thức</h2><div class="body" id="o2"><p class="hint">Hoàn thành bước 1 để mở bước này.</p></div></section>
+  <section id="s3" class="lock"><h2><i>3</i>File Excel lương và chấm công</h2><div class="body" id="o3"><p class="hint">Công thức phải hợp lệ trước khi nhập Excel.</p></div></section>
+  <section id="s4" class="lock"><h2><i>4</i>Kết quả tính lương</h2><div class="body" id="o4"><p class="hint">Map đủ cột Excel để tính lương.</p></div></section>
+</main>
+<dialog id="dlg"></dialog>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const money=n=>Number(n||0).toLocaleString('vi-VN',{maximumFractionDigits:2});
+const St={sid:null,cand:null,warn:[],sheets:[],raw:null,an:null,res:null,manual:{},cfg:{sheet:'',header:1,start:2,idcol:null}};
+if(location.protocol.startsWith('http'))$('#base').value=location.origin;
+try{const b=localStorage.getItem('hr_base');if(b&&!location.protocol.startsWith('http'))$('#base').value=b}catch{}
+const base=()=>$('#base').value.replace(/\/$/,'');
+function toast(m,bad){const e=document.createElement('div');e.textContent=m;if(bad)e.className='bad';$('#toast').append(e);setTimeout(()=>e.remove(),bad?8000:3500)}
+
+async function api(path,opt={}){
+  let r;
+  try{r=await fetch(base()+'/payroll'+path,opt)}
+  catch{throw new Error('Không kết nối được '+base()+'. Hãy chạy backend: uvicorn api:app --app-dir src')}
+  let d=null;try{d=await r.json()}catch{}
+  if(!r.ok){const t=d&&d.detail;throw new Error(typeof t==='string'?t:Array.isArray(t)?t.map(x=>x.msg).join('; '):r.status+' '+r.statusText)}
+  return d;
+}
+const post=(p,b)=>api(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+async function ensure(){if(!St.sid)St.sid=(await api('/sessions',{method:'POST'})).session_id;return St.sid}
+async function go(btn,fn){
+  const t=btn.innerHTML;btn.disabled=true;btn.innerHTML='<span class="spin"></span>Đang xử lý…';
+  try{await fn()}catch(e){toast(e.message,true)}finally{btn.disabled=false;btn.innerHTML=t}
+}
+function unlock(id,done){const s=$(id);s.classList.remove('lock');s.classList.toggle('done',!!done)}
+const lock=id=>{const s=$(id);s.classList.add('lock');s.classList.remove('done')};
+
+/* ----- Bước 1 ----- */
+$('#base').onchange=()=>{try{localStorage.setItem('hr_base',$('#base').value)}catch{};St.sid=null};
+$('#b1').onclick=e=>go(e.currentTarget,async()=>{
+  const f=$('#pf').files[0];if(!f)throw new Error('Chọn file chính sách trước.');
+  const sid=await ensure();const fd=new FormData();fd.append('file',f);fd.append('company_id',$('#company').value.trim()||'UPLOAD');
+  const r=await api(`/sessions/${sid}/policy`,{method:'POST',body:fd});
+  St.cand=r.cand=r.candidate;St.warn=r.warnings;St.an=St.res=null;St.manual={};
+  $('#o1').innerHTML='<div class="msg ok">Đã trích xuất công thức từ chính sách.</div>'+(r.warnings.length?`<div class="msg warn">${r.warnings.map(esc).join('<br>')}</div>`:'');
+  unlock('#s1',true);r2();r3();r4();
+});
+
+/* ----- Bước 2 ----- */
+const SRC=['employee','attendance','rate_config','regulatory','literal'],SEC=['','line_items','deductions','employer_cost'];
+const opt=(a,v)=>a.map(x=>`<option ${x===v?'selected':''}>${x}</option>`).join('');
+function r2(){
+  const c=St.cand;if(!c)return;const v=c.validation;
+  const needs=c.variables.filter(x=>['employee','attendance'].includes(x.source));
+  $('#o2').innerHTML=`
+  <div class="msg ${v.passed?'ok':'bad'}">${v.passed?'Bảng công thức hợp lệ về cấu trúc và có thể dùng để tính lương.':'Bảng công thức chưa hợp lệ; chưa thể tính lương.'}${v.errors.length?`<ul>${v.errors.map(e=>`<li>${esc(e)}</li>`).join('')}</ul>`:''}</div>
+  ${v.warnings.length?`<div class="msg warn"><ul>${v.warnings.map(e=>`<li>${esc(e)}</li>`).join('')}</ul></div>`:''}
+  <p class="hint">${needs.length?`Cần ${needs.length} cột từ Excel: <b>${needs.map(x=>esc(x.field_code||x.name)).join(', ')}</b>. Các biến còn lại là hằng số hoặc kết quả trung gian.`:'Công thức không cần cột Excel nào ngoài mã nhân viên.'}</p>
+  <h3>Biến và hằng số</h3>
+  <div class="scroll"><table><tr><th>Tên biến</th><th>Nguồn</th><th>Mã dữ liệu</th><th>Giá trị cố định</th><th>Ghi chú</th><th></th></tr>
+  ${c.variables.map((x,i)=>`<tr><td><input value="${esc(x.name)}" oninput="St.cand.variables[${i}].name=this.value"></td>
+  <td><select onchange="St.cand.variables[${i}].source=this.value">${opt(SRC,x.source)}</select></td>
+  <td><input value="${esc(x.field_code)}" oninput="St.cand.variables[${i}].field_code=this.value"></td>
+  <td><input type="number" step="any" value="${x.value??''}" oninput="St.cand.variables[${i}].value=this.value===''?null:+this.value"></td>
+  <td><input value="${esc(x.description)}" oninput="St.cand.variables[${i}].description=this.value"></td>
+  <td><button class="btn ghost sm" onclick="del('variables',${i})" aria-label="Xóa biến">Xóa</button></td></tr>`).join('')}</table></div>
+  <div class="row"><button class="btn ghost sm" onclick="add('variables')">Thêm biến</button></div>
+  <h3>Khoản tính</h3>
+  <div class="scroll"><table><tr><th>Mã khoản tính</th><th>Công thức</th><th>Điều kiện</th><th>Làm tròn</th><th>Nhóm</th><th>Ghi chú</th><th></th></tr>
+  ${c.rules.map((x,i)=>`<tr><td><input value="${esc(x.output_field)}" oninput="St.cand.rules[${i}].output_field=this.value"></td>
+  <td><input style="min-width:260px" value="${esc(x.expression)}" oninput="St.cand.rules[${i}].expression=this.value"></td>
+  <td><input value="${esc(x.condition)}" oninput="St.cand.rules[${i}].condition=this.value"></td>
+  <td><input placeholder="round_down_1000" value="${esc(x.rounding)}" oninput="St.cand.rules[${i}].rounding=this.value"></td>
+  <td><select onchange="St.cand.rules[${i}].section=this.value">${opt(SEC,x.section)}</select></td>
+  <td><input value="${esc(x.description)}" oninput="St.cand.rules[${i}].description=this.value"></td>
+  <td><button class="btn ghost sm" onclick="del('rules',${i})" aria-label="Xóa khoản tính">Xóa</button></td></tr>`).join('')}</table></div>
+  <div class="row"><button class="btn ghost sm" onclick="add('rules')">Thêm khoản tính</button><button class="btn" id="b2a">Áp dụng thay đổi và kiểm tra lại</button></div>
+  <h3>Thiếu cột hoặc cần sửa công thức?</h3>
+  <p class="hint">Ví dụ: “Bổ sung phụ cấp xăng xe từ cột Phụ cấp xăng xe của Excel” hoặc “OT ngày lễ là 300%”.</p>
+  <textarea id="fb" aria-label="Yêu cầu của HR"></textarea>
+  <div class="row"><button class="btn ghost" id="b2b">Gửi yêu cầu và tạo lại công thức</button></div>`;
+  $('#b2a').onclick=e=>go(e.currentTarget,async()=>{St.cand=(await post(`/sessions/${St.sid}/formula/edit`,{variables:St.cand.variables,rules:St.cand.rules})).candidate;afterFormula();toast('Đã áp dụng thay đổi')});
+  $('#b2b').onclick=e=>go(e.currentTarget,async()=>{const t=$('#fb').value.trim();if(!t)throw new Error('Hãy nhập nội dung cần bổ sung hoặc sửa.');St.cand=(await post(`/sessions/${St.sid}/formula/feedback`,{text:t})).candidate;afterFormula();toast('Đã tạo lại công thức')});
+  unlock('#s2',v.passed);
+  if(v.passed)unlock('#s3',!!St.an);else{lock('#s3');lock('#s4')}
+}
+function afterFormula(){St.an=St.res=null;St.manual={};r2();r3();r4()}
+function del(k,i){St.cand[k].splice(i,1);r2()}
+function add(k){St.cand[k].push(k==='variables'?{name:'',source:'employee',field_code:'',value:null,description:''}:{output_field:'',expression:'',condition:'',rounding:'',section:'',category:'',description:''});r2()}
+
+/* ----- Bước 3 ----- */
+function r3(){
+  if(!St.cand||!St.cand.validation.passed)return;
+  const el=$('#o3');
+  if(!$('#xf')){
+    el.innerHTML=`<label for="xf">File Excel (.xlsx, .xlsm)</label><input id="xf" type="file" accept=".xlsx,.xlsm">
+    <div class="row"><button class="btn" id="b3">Tải file lên</button></div><div id="o3b"></div>`;
+    $('#b3').onclick=e=>go(e.currentTarget,async()=>{
+      const f=$('#xf').files[0];if(!f)throw new Error('Chọn file Excel trước.');
+      const fd=new FormData();fd.append('file',f);
+      St.sheets=(await api(`/sessions/${St.sid}/excel`,{method:'POST',body:fd})).sheets;
+      St.cfg.sheet=St.sheets[0];St.an=St.res=null;St.manual={};await loadRaw();r4()});
+  }
+  r3b();
+}
+async function loadRaw(){St.raw=await api(`/sessions/${St.sid}/excel/preview?sheet=${encodeURIComponent(St.cfg.sheet)}`);r3b()}
+function cfgBody(){return{sheet:St.cfg.sheet,header_row:St.cfg.header,data_start_row:St.cfg.start,employee_id_column:St.cfg.idcol,manual_mapping:St.manual}}
+function r3b(){
+  const el=$('#o3b');if(!el)return;
+  if(!St.sheets.length){el.innerHTML='<p class="hint">Excel cần một sheet chứa mã nhân viên và các cột đầu vào nêu trong công thức.</p>';return}
+  const raw=St.raw;let h=`<label for="sh">Sheet dữ liệu</label><select id="sh">${opt(St.sheets,St.cfg.sheet)}</select>`;
+  if(raw)h+=`<p class="hint">Xem trước 20 dòng đầu. Cột đầu tiên là số dòng Excel; chọn dòng chứa tên cột (header) bên dưới.</p>
+  <div class="scroll"><table><tr><th>Dòng</th>${Array.from({length:raw.ncols},(_,i)=>`<th>${i+1}</th>`).join('')}</tr>${raw.rows.map(r=>`<tr>${r.map((c,i)=>`<td${i?'':' style="color:var(--mut)"'}>${esc(c)}</td>`).join('')}</tr>`).join('')}</table></div>
+  <div class="g2"><div><label for="hr">Dòng chứa tên cột (header)</label><input id="hr" type="number" min="1" value="${St.cfg.header}"></div>
+  <div><label for="ds">Dòng bắt đầu dữ liệu thật</label><input id="ds" type="number" min="${St.cfg.header+1}" value="${St.cfg.start}"></div></div>
+  <p class="hint">Ví dụ: header ở dòng 4 nhưng dòng 5, 6 là dòng rác thì đặt dòng bắt đầu dữ liệu là 7.</p>
+  <div class="row"><button class="btn" id="b3a">Phân tích cột</button></div>`;
+  h+='<div id="an"></div>';el.innerHTML=h;
+  $('#sh').onchange=async e=>{St.cfg.sheet=e.target.value;St.an=St.res=null;St.manual={};try{await loadRaw()}catch(x){toast(x.message,true)};r4()};
+  if(raw){
+    $('#hr').onchange=e=>{St.cfg.header=Math.max(1,+e.target.value||1);if(St.cfg.start<=St.cfg.header)St.cfg.start=St.cfg.header+1;r3b()};
+    $('#ds').onchange=e=>{St.cfg.start=Math.max(St.cfg.header+1,+e.target.value||St.cfg.header+1)};
+    $('#b3a').onclick=e=>go(e.currentTarget,analyze);
+  }
+  if(St.an)renderAn();
+}
+async function analyze(){St.an=await post(`/sessions/${St.sid}/excel/analyze`,cfgBody());St.cfg.idcol=St.an.employee_id_column;St.res=null;renderAn();r4()}
+function renderAn(){
+  const a=St.an,m=[...a.employee_mapping,...a.attendance_mapping],miss=a.missing;
+  const choices=['— Chưa có cột tương ứng —',...a.columns.filter(c=>c!==a.employee_id_column)];
+  $('#an').innerHTML=`
+  <h3>Cột mã nhân viên</h3>${a.id_detected?'':'<div class="msg warn">Chưa tự nhận diện được cột mã nhân viên. Hãy chọn đúng cột.</div>'}
+  <select id="idc" aria-label="Cột mã nhân viên">${opt(a.columns,a.employee_id_column)}</select>
+  <h3>Cột đã được chuẩn hóa tự động</h3>
+  ${m.length?`<div class="scroll"><table><tr><th>Nguồn</th><th>Cột Excel</th><th>Chuẩn hóa thành</th></tr>${m.map(x=>`<tr><td>${esc(x.source)}</td><td>${esc(x.column)}</td><td>${esc(x.field_code)}</td></tr>`).join('')}</table></div>`:'<p class="hint">Chưa có cột nào được map.</p>'}
+  ${miss.length?`<div class="msg bad">Excel chưa có đủ cột cho công thức: ${miss.map(x=>esc(x.field_code)).join(', ')}</div>
+  <p class="hint">Chọn cột tương ứng nếu Excel dùng tên nội bộ, hoặc đổi tên header cho khớp rồi tải lại file.</p>
+  ${miss.map(x=>`<label>Cột Excel cho <code>${esc(x.field_code)}</code> (${x.source==='employee'?'hồ sơ nhân viên':'chấm công'})</label>
+  <select data-code="${esc(x.field_code)}" class="mm">${choices.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('')}</select>`).join('')}
+  <div class="row"><button class="btn ghost" id="b3r">Tạo lại công thức chỉ dùng cột Excel hiện có</button></div>`
+  :'<div class="msg ok">Đã map đủ các cột mà công thức cần.</div>'}
+  <h3>10 dòng dữ liệu đầu</h3><div class="scroll"><table><tr>${a.columns.map(c=>`<th>${esc(c)}</th>`).join('')}</tr>${a.preview.map(r=>`<tr>${r.map(c=>`<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</table></div>`;
+  $('#idc').onchange=e=>{St.cfg.idcol=e.target.value;St.manual={};go(e.target,analyze)};
+  document.querySelectorAll('.mm').forEach(s=>s.onchange=e=>{const c=e.target.dataset.code;if(e.target.selectedIndex===0)delete St.manual[c];else St.manual[c]=e.target.value;go(e.target,analyze)});
+  const rb=$('#b3r');if(rb)rb.onclick=e=>go(e.currentTarget,async()=>{St.cand=(await post(`/sessions/${St.sid}/formula/regenerate-from-columns`,cfgBody())).candidate;afterFormula();toast('Đã tạo lại công thức theo cột Excel hiện có')});
+  unlock('#s3',!miss.length);
+}
+
+/* ----- Bước 4 ----- */
+const sum=a=>(a||[]).reduce((t,x)=>t+x.amount,0);
+function r4(){
+  const el=$('#o4');
+  if(!St.an||St.an.missing.length){lock('#s4');el.innerHTML='<p class="hint">Map đủ cột Excel để tính lương.</p>';return}
+  unlock('#s4',!!St.res);
+  if(!St.res){el.innerHTML='<div class="row" style="margin-top:4px"><button class="btn" id="b4">Tính lương</button></div>';$('#b4').onclick=e=>go(e.currentTarget,calc);return}
+  const R=St.res.results,G=St.res.gate,pend=r=>r.anomaly_flags.filter(f=>f.requires_review!==false&&!(G.resolved[r.employee_id]||{})[f.code]);
+  el.innerHTML=`<div class="stats"><div><b>${R.length}</b><span>nhân viên</span></div><div><b>${money(R.reduce((t,r)=>t+r.gross_salary,0))}</b><span>tổng Gross (VND)</span></div><div><b>${money(R.reduce((t,r)=>t+r.net_salary,0))}</b><span>tổng Net (VND)</span></div><div><b>${G.pending.length}</b><span>cờ chưa xử lý</span></div></div>
+  <div class="msg ${G.can_publish?'ok':'warn'}">${G.can_publish?'Không còn cờ bất thường chờ xử lý. Có thể xuất bảng lương.':`Còn ${G.pending.length} cờ bất thường chưa xử lý. Mở từng nhân viên để xem giải thích và ghi nhận kết quả kiểm tra; chỉ xuất được bảng lương khi xử lý xong.`}</div>
+  ${St.res.warnings.length?`<div class="msg warn">${St.res.warnings.map(esc).join('<br>')}</div>`:''}
+  <div class="row"><input id="q" placeholder="Tìm mã nhân viên" style="max-width:240px" aria-label="Tìm mã nhân viên"><label style="margin:0;display:flex;gap:6px;align-items:center;font-weight:500"><input id="onlyf" type="checkbox" style="width:auto">Chỉ hiện dòng cần kiểm tra</label>
+  <button class="btn ghost" id="csv" style="margin-left:auto">Tải CSV</button><button class="btn ghost" id="xls">Xuất Excel</button><button class="btn" id="b4">Tính lại</button></div>
+  <div class="scroll" style="margin-top:12px"><table><thead><tr><th>Mã nhân viên</th><th class="num">Gross</th><th class="num">Khấu trừ</th><th class="num">Net</th><th>Cần kiểm tra</th></tr></thead><tbody id="tb"></tbody></table></div>
+  <p class="hint">Bấm vào một dòng để xem phiếu lương chi tiết.</p>`;
+  const draw=()=>{const q=$('#q').value.trim().toLowerCase(),of=$('#onlyf').checked;
+    $('#tb').innerHTML=R.map((r,i)=>[r,i]).filter(([r])=>(!q||r.employee_id.toLowerCase().includes(q))&&(!of||pend(r).length)).map(([r,i])=>
+    `<tr class="click" tabindex="0" data-i="${i}"><td>${esc(r.employee_id)}</td><td class="num">${money(r.gross_salary)}</td><td class="num">${money(sum(r.deductions))}</td><td class="num">${money(r.net_salary)}</td><td>${pend(r).length?`<span class="tag">${esc(pend(r).map(f=>f.code).join(', '))}</span>`:`<span class="tag ok">${r.anomaly_flags.length?'Đã xử lý':'Không'}</span>`}</td></tr>`).join('')||'<tr><td colspan="5" class="hint">Không có dòng phù hợp.</td></tr>'};
+  draw();$('#q').oninput=draw;$('#onlyf').onchange=draw;
+  $('#tb').onclick=e=>{const t=e.target.closest('tr[data-i]');if(t)slip(R[+t.dataset.i])};
+  $('#tb').onkeydown=e=>{if(e.key==='Enter'){const t=e.target.closest('tr[data-i]');if(t)slip(R[+t.dataset.i])}};
+  $('#csv').onclick=()=>{const rows=[['Mã nhân viên','Gross','Khấu trừ','Net','Cần kiểm tra'],...R.map(r=>[r.employee_id,r.gross_salary,sum(r.deductions),r.net_salary,r.anomaly_flags.map(f=>f.code).join(', ')||'Không'])];
+    const t='\ufeff'+rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(',')).join('\r\n');
+    const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([t],{type:'text/csv;charset=utf-8'}));a.download=`bang_luong_${St.res.period}.csv`;a.click()};
+  $('#xls').onclick=e=>go(e.currentTarget,()=>dl('kind=payroll&fmt=xlsx',`bang_luong_${St.res.period}.xlsx`));
+  $('#b4').onclick=e=>go(e.currentTarget,calc);
+}
+async function dl(qs,name){const r=await fetch(`${base()}/payroll/sessions/${St.sid}/export?${qs}`);if(!r.ok){let d=null;try{d=await r.json()}catch{}throw new Error((d&&d.detail)||'Không xuất được file')}const a=document.createElement('a');a.href=URL.createObjectURL(await r.blob());a.download=name;a.click()}
+async function calc(){
+  const p=$('#period').value.trim();if(!p)throw new Error('Nhập kỳ lương ở đầu trang.');
+  St.res=await post(`/sessions/${St.sid}/calculate`,{...cfgBody(),period:p});r4();toast(`Đã tính lương cho ${St.res.count} nhân viên`)}
+function slip(r){
+  const t=(title,a)=>a.length?`<h3>${title}</h3><table>${a.map(x=>`<tr><td>${esc(x.field_code)}</td><td class="num">${money(x.amount)}</td></tr>`).join('')}</table>`:'';
+  $('#dlg').innerHTML=`<h2 style="margin:0 0 2px;font-size:17px">Phiếu lương ${esc(r.employee_id)}</h2><div class="hint">Kỳ ${esc(r.period)}</div>
+  ${t('Thu nhập',r.line_items)}<p><b>Gross: ${money(r.gross_salary)}</b></p>${t('Khấu trừ',r.deductions)}${t('Chi phí doanh nghiệp',r.employer_cost)}<p><b>Net: ${money(r.net_salary)}</b></p>
+  ${r.anomaly_flags.length?`<h3>Bất thường cần kiểm tra</h3>${r.anomaly_flags.map(f=>{const rv=(St.res.gate.resolved[r.employee_id]||{})[f.code];return `<div class="msg ${rv?'ok':'warn'}"><b>${esc(f.code)}</b> (${esc(f.severity)}): ${esc(f.message)}${f.actual!=null?`<br>Thực tế: ${money(f.actual)} · Ngưỡng: ${money(f.threshold)}`:''}
+  ${rv?`<br>Đã xử lý bởi ${esc(rv.actor)}: ${esc(rv.note)}`:`<div id="ex-${esc(f.code)}"></div><label for="nt-${esc(f.code)}">Ghi chú kiểm tra</label><input id="nt-${esc(f.code)}" placeholder="Đã đối chiếu với… (tối thiểu 3 ký tự)"><div class="row"><button class="btn ghost sm" onclick="explain('${esc(r.employee_id)}','${esc(f.code)}',this)">Giải thích</button><button class="btn sm" onclick="resolveFlag('${esc(r.employee_id)}','${esc(f.code)}',this)">Đánh dấu đã xử lý</button></div>`}</div>`}).join('')}`:''}
+  <div class="row"><button class="btn ghost" onclick="go(this,()=>dl('kind=payslip&fmt=xlsx&employee_id='+encodeURIComponent('${esc(r.employee_id)}'),'phieu_luong_${esc(r.employee_id)}.xlsx'))">Xuất phiếu lương</button><button class="btn" onclick="$('#dlg').close()">Đóng</button></div>`;if(!$('#dlg').open)$('#dlg').showModal()}
+function explain(emp,code,btn){go(btn,async()=>{const r=await post(`/sessions/${St.sid}/anomaly/explain`,{employee_id:emp,code});$('#ex-'+code).innerHTML=`<p style="margin:8px 0">${esc(r.explanation)}</p><p class="hint">${r.by_llm?'Do LLM giải thích; không thay đổi số liệu.':'Giải thích mặc định (chưa cấu hình LLM).'}</p>`})}
+function resolveFlag(emp,code,btn){go(btn,async()=>{const note=$('#nt-'+code).value.trim();if(note.length<3)throw new Error('Nhập ghi chú kiểm tra trước khi đánh dấu đã xử lý.');St.res.gate=await post(`/sessions/${St.sid}/anomaly/resolve`,{employee_id:emp,code,note});r4();slip(St.res.results.find(x=>x.employee_id===emp));toast('Đã ghi nhận xử lý')})}
+</script>
+</body>
+</html>

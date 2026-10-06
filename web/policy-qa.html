@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hỏi đáp chính sách</title>
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#eef1ee;--surf:#fff;--ink:#14231f;--mut:#5d6b66;--line:#d5dcd8;--acc:#0f6b5c;--onacc:#fff;--acc2:#e3f1ee;--warn:#8a5610;--warnbg:#fbf0dc;--bad:#b3261e;--badbg:#fbe4e2;--ok:#1d6b3a;--okbg:#e0f2e6;--r:8px}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1715;--surf:#17211e;--ink:#e6eeea;--mut:#9aaba5;--line:#2b3a36;--acc:#4fc3ad;--onacc:#07211c;--acc2:#16322d;--warn:#e7b25c;--warnbg:#35290f;--bad:#f2867f;--badbg:#3a1a18;--ok:#76d49a;--okbg:#143322}}
+*{box-sizing:border-box}html,body{margin:0}
+body{font:15px/1.55 "Be Vietnam Pro",system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--ink)}
+button,input,select,textarea{font:inherit;color:inherit}
+header{background:var(--surf);border-bottom:1px solid var(--line);padding:12px 24px;display:flex;gap:14px;align-items:end;flex-wrap:wrap}
+header h1{font-size:18px;margin:0 auto 0 0;align-self:center}
+.tabs{display:flex;gap:4px;padding:12px 24px 0}
+.tabs button{border:0;background:none;padding:9px 16px;border-radius:var(--r) var(--r) 0 0;cursor:pointer;font-weight:600;color:var(--mut)}
+.tabs button.on{background:var(--surf);color:var(--ink);border:1px solid var(--line);border-bottom-color:var(--surf)}
+main{max-width:1080px;margin:0 auto;padding:0 20px 70px}
+.card{background:var(--surf);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;margin-top:14px}
+.card h3{margin:0 0 8px;font-size:15px}
+label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px}
+input,select,textarea{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:var(--r);background:var(--bg)}
+textarea{min-height:76px;resize:vertical}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.btn{background:var(--acc);color:var(--onacc);border:0;border-radius:var(--r);padding:9px 16px;font-weight:600;cursor:pointer}
+.btn:disabled{opacity:.5;cursor:not-allowed}.btn.ghost{background:none;color:var(--ink);border:1px solid var(--line)}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}
+.g{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+.msg{padding:10px 12px;border-radius:var(--r);margin-top:12px;font-size:14px}
+.msg.ok{background:var(--okbg);color:var(--ok)}.msg.bad{background:var(--badbg);color:var(--bad)}.msg.warn{background:var(--warnbg);color:var(--warn)}.msg.info{background:var(--acc2);color:var(--acc)}
+.badge{display:inline-block;padding:1px 9px;border-radius:99px;font-size:12px;font-weight:600;background:var(--acc2);color:var(--acc)}
+.badge.bad{background:var(--badbg);color:var(--bad)}.badge.ok{background:var(--okbg);color:var(--ok)}.badge.warn{background:var(--warnbg);color:var(--warn)}
+.ans{font-size:16px;line-height:1.65;white-space:pre-wrap}
+.ev{border-left:3px solid var(--line);padding:6px 0 6px 12px;margin-top:12px}
+.ev.cited{border-left-color:var(--acc)}
+.ev small{color:var(--mut);display:block}
+.ev p{margin:4px 0 0;white-space:pre-wrap;font-size:14px}
+.scroll{overflow:auto;border:1px solid var(--line);border-radius:var(--r)}
+table{border-collapse:collapse;width:100%;font-size:13.5px}th,td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+th{color:var(--mut);font-size:12.5px;font-weight:600}
+.hint{color:var(--mut);font-size:13px;margin:6px 0}
+.spin{display:inline-block;width:13px;height:13px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:s .7s linear infinite;vertical-align:-2px;margin-right:6px}
+@keyframes s{to{transform:rotate(360deg)}}
+#toast{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:9}
+#toast div{background:var(--ink);color:var(--bg);padding:10px 14px;border-radius:var(--r);max-width:380px;font-size:13.5px}#toast div.bad{background:var(--bad);color:#fff}
+@media(prefers-reduced-motion:reduce){.spin{animation:none}}
+</style>
+</head>
+<body>
+<header><h1>Hỏi đáp chính sách</h1><div style="min-width:230px"><label for="base" style="margin:0 0 3px">Địa chỉ backend</label><input id="base" value="http://localhost:8000"></div></header>
+<div class="tabs"><button data-t="ask" class="on">Hỏi đáp</button><button data-t="docs">Tài liệu chính sách</button></div>
+<main>
+<div id="ask">
+  <div class="card"><h3>Ai đang hỏi?</h3>
+    <p class="hint">Hệ thống chỉ truy xuất những đoạn mà người hỏi có quyền xem: đúng công ty, phòng ban, còn hiệu lực và đủ mức quyền.</p>
+    <div class="g">
+      <div><label for="co">Công ty</label><input id="co" value="UPLOAD"></div>
+      <div><label for="sc">Phòng ban (cách nhau bằng dấu phẩy)</label><input id="sc" placeholder="HR, Kế toán"></div>
+      <div><label for="pl">Mức quyền</label><select id="pl"><option>PUBLIC</option><option selected>INTERNAL</option><option>CONFIDENTIAL</option><option>RESTRICTED</option></select></div>
+      <div><label for="asof">Tại ngày</label><input id="asof" type="date"></div>
+    </div></div>
+  <div class="card"><label for="q" style="margin-top:0">Câu hỏi</label>
+    <textarea id="q" placeholder="Ví dụ: Tăng ca ngày lễ được tính bao nhiêu phần trăm lương?"></textarea>
+    <div class="row"><button class="btn" id="go">Hỏi</button><label style="margin:0;display:flex;gap:8px;align-items:center;font-weight:500">Số đoạn căn cứ<input id="k" type="number" min="1" max="20" value="5" style="width:70px"></label></div></div>
+  <div id="res"></div>
+</div>
+<div id="docs" hidden>
+  <div class="card"><h3>Đăng ký tài liệu mới</h3>
+    <p class="hint">Tài liệu được parse, lưu phiên bản, kiểm tra trùng lặp và chồng lấn hiệu lực, rồi đưa vào chỉ mục tìm kiếm.</p>
+    <label for="f">File (PDF, DOCX, TXT)</label><input id="f" type="file" accept=".pdf,.docx,.txt">
+    <div class="g">
+      <div><label for="pk">Mã chính sách (policy_key)</label><input id="pk" placeholder="quy-che-luong"></div>
+      <div><label for="ti">Tiêu đề</label><input id="ti"></div>
+      <div><label for="ca">Danh mục</label><input id="ca" placeholder="payroll"></div>
+      <div><label for="ed">Hiệu lực từ</label><input id="ed" type="date"></div>
+      <div><label for="xd">Hết hiệu lực (không bắt buộc)</label><input id="xd" type="date"></div>
+      <div><label for="dc">Công ty (để trống: mọi công ty)</label><input id="dc"></div>
+      <div><label for="ds">Phòng ban (để trống: tất cả)</label><input id="ds" placeholder="HR, Kế toán"></div>
+      <div><label for="dp">Quyền tối thiểu</label><select id="dp"><option value="">Không giới hạn</option><option>INTERNAL</option><option>CONFIDENTIAL</option><option>RESTRICTED</option></select></div>
+    </div>
+    <div class="row"><button class="btn" id="up">Đăng ký và lập chỉ mục</button></div><div id="upres"></div></div>
+  <div class="card"><div class="row" style="margin:0"><h3 style="margin:0 auto 0 0">Tài liệu đã đăng ký</h3><button class="btn ghost" id="rf">Làm mới</button></div><div id="list" style="margin-top:10px"></div></div>
+</div>
+</main>
+<div id="toast" role="status" aria-live="polite"></div>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+if(location.protocol.startsWith('http'))$('#base').value=location.origin;
+const base=()=>$('#base').value.replace(/\/$/,'');
+function toast(m,bad){const e=document.createElement('div');e.textContent=m;if(bad)e.className='bad';$('#toast').append(e);setTimeout(()=>e.remove(),bad?8000:3500)}
+async function api(p,opt={}){
+  let r;try{r=await fetch(base()+'/policy'+p,opt)}catch{throw new Error('Không kết nối được '+base()+'. Hãy chạy backend: uvicorn api:app --app-dir src')}
+  let d=null;try{d=await r.json()}catch{}
+  if(!r.ok){const t=d&&d.detail;throw new Error(typeof t==='string'?t:Array.isArray(t)?t.map(x=>x.msg).join('; '):r.status+' '+r.statusText)}return d}
+async function go(btn,fn){const t=btn.innerHTML;btn.disabled=true;btn.innerHTML='<span class="spin"></span>Đang xử lý…';try{await fn()}catch(e){toast(e.message,true)}finally{btn.disabled=false;btn.innerHTML=t}}
+const list=s=>s.split(',').map(x=>x.trim()).filter(Boolean);
+document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tabs button').forEach(x=>x.classList.toggle('on',x===b));$('#ask').hidden=b.dataset.t!=='ask';$('#docs').hidden=b.dataset.t!=='docs';if(b.dataset.t==='docs')loadDocs().catch(e=>toast(e.message,true))});
+
+/* Hỏi đáp */
+$('#go').onclick=e=>go(e.currentTarget,async()=>{
+  const q=$('#q').value.trim();if(q.length<3)throw new Error('Nhập câu hỏi.');
+  $('#res').innerHTML='';
+  const r=await api('/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q,company:$('#co').value.trim(),scopes:list($('#sc').value),permission_level:$('#pl').value,as_of_date:$('#asof').value||null,top_k:+$('#k').value||5})});
+  show(r)});
+function show(r){
+  const cited=new Set(r.citations.filter(c=>c.valid).map(c=>c.evidence_id));
+  const cls={answered:'ok',blocked:'bad',no_evidence:'warn',retrieval_only:'info',llm_error:'bad'}[r.status]||'info';
+  let h='';
+  if(r.status==='answered')h+=`<div class="card"><h3>Trả lời</h3><div class="ans">${esc(r.answer)}</div><div class="row"><span class="badge ok">${r.citations.length} trích dẫn đã được kiểm chứng với tài liệu gốc</span></div></div>`;
+  else h+=`<div class="msg ${cls}">${esc(r.message||'')}</div>`;
+  if(r.status==='blocked'&&r.citations.length)h+=`<div class="card"><h3>Kết quả kiểm tra trích dẫn</h3><div class="scroll"><table><tr><th>Căn cứ</th><th>Kết quả</th><th>Độ khớp</th></tr>${r.citations.map(c=>`<tr><td>${esc(c.evidence_id)}</td><td><span class="badge ${c.valid?'ok':'bad'}">${c.valid?'Hợp lệ':esc({unknown_evidence_id:'Căn cứ không tồn tại',quote_not_found:'Không tìm thấy đoạn trích',number_mismatch:'Sai số liệu'}[c.issue]||c.issue)}</span></td><td>${c.similarity==null?'—':Math.round(c.similarity*100)+'%'}</td></tr>`).join('')}</table></div></div>`;
+  if(r.evidence.length)h+=`<div class="card"><h3>Căn cứ từ chính sách (${r.evidence.length})</h3>${r.evidence.map(e=>{const l=e.location||{},m=e.metadata||{};return `<div class="ev ${cited.has(e.evidence_id)?'cited':''}"><b>${esc(e.heading_path||'(không có tiêu đề)')}</b> ${cited.has(e.evidence_id)?'<span class="badge ok">được trích dẫn</span>':''}
+  <small>${esc(e.source_display_name)}${l.page?' · trang '+esc(l.page):''}${l.sheet?' · sheet '+esc(l.sheet):''} · điểm ${Number(e.score).toFixed(3)}${m.effective_date?' · hiệu lực từ '+esc(m.effective_date):''}</small><p>${esc(e.text)}</p></div>`}).join('')}</div>`;
+  $('#res').innerHTML=h}
+
+/* Tài liệu */
+async function loadDocs(){
+  const d=(await api('/documents')).documents;
+  $('#list').innerHTML=d.length?`<div class="scroll"><table><tr><th>Mã</th><th>Phiên bản</th><th>Tiêu đề</th><th>Danh mục</th><th>Trạng thái</th><th>Hiệu lực</th><th>Phạm vi</th></tr>${d.map(x=>`<tr><td>${esc(x.policy_key)}</td><td>v${x.version}</td><td>${esc(x.title)}</td><td>${esc(x.category)}</td><td><span class="badge ${x.status==='active'?'ok':'warn'}">${esc({active:'Đang hiệu lực',superseded:'Đã bị thay thế',archived:'Lưu trữ'}[x.status]||x.status)}</span></td><td>${esc(x.effective_date)}${x.expiry_date?' → '+esc(x.expiry_date):''}</td><td>${esc([x.company,[].concat(x.scope||[]).join('/'),x.required_permission].filter(Boolean).join(' · ')||'Mọi người')}</td></tr>`).join('')}</table></div>`:'<p class="hint">Chưa có tài liệu nào. Đăng ký tài liệu ở trên để bắt đầu hỏi đáp.</p>'}
+$('#rf').onclick=e=>go(e.currentTarget,loadDocs);
+$('#up').onclick=e=>go(e.currentTarget,async()=>{
+  const f=$('#f').files[0];if(!f)throw new Error('Chọn file chính sách trước.');
+  for(const [id,n] of [['pk','mã chính sách'],['ti','tiêu đề'],['ca','danh mục'],['ed','ngày hiệu lực']])if(!$('#'+id).value.trim())throw new Error('Nhập '+n+'.');
+  const fd=new FormData();fd.append('file',f);
+  const m={policy_key:'pk',title:'ti',category:'ca',effective_date:'ed',expiry_date:'xd',company:'dc',scope:'ds',required_permission:'dp'};
+  for(const k in m){const v=$('#'+m[k]).value.trim();if(v)fd.append(k,v)}
+  const r=await api('/documents',{method:'POST',body:fd});
+  let h=r.is_duplicate?'<div class="msg warn">File này trùng với phiên bản đã có nên không lập chỉ mục lại.</div>':`<div class="msg ok">Đã đăng ký ${esc(r.document.policy_key)} phiên bản ${r.document.version} và lập chỉ mục.</div>`;
+  if(r.overlaps.length)h+=`<div class="msg warn">Hiệu lực chồng lấn với: ${r.overlaps.map(o=>esc(o.existing_title)+' (v'+o.existing_version+')').join(', ')}. Hãy kiểm tra để tránh hai chính sách mâu thuẫn.</div>`;
+  if(r.warnings.length)h+=`<div class="msg warn">${r.warnings.map(esc).join('<br>')}</div>`;
+  $('#upres').innerHTML=h;await loadDocs()});
+</script>
+</body>
+</html>

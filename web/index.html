@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HR Agentic AI</title>
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#eef1ee;--surf:#fff;--ink:#14231f;--mut:#5d6b66;--line:#d5dcd8;--acc:#0f6b5c;--onacc:#fff}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1715;--surf:#17211e;--ink:#e6eeea;--mut:#9aaba5;--line:#2b3a36;--acc:#4fc3ad;--onacc:#07211c}}
+*{box-sizing:border-box}html,body{margin:0;height:100%}
+body{font:15px/1.5 "Be Vietnam Pro",system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--ink);display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:6px;padding:0 18px;background:var(--surf);border-bottom:1px solid var(--line);flex-wrap:wrap}
+header b{margin-right:18px;padding:12px 0}
+header button{border:0;background:none;padding:14px 14px 12px;cursor:pointer;font:inherit;font-weight:600;color:var(--mut);border-bottom:3px solid transparent}
+header button:hover{color:var(--ink)}
+header button.on{color:var(--acc);border-bottom-color:var(--acc)}
+:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
+iframe{flex:1;border:0;width:100%;background:var(--bg)}
+</style>
+</head>
+<body>
+<header role="tablist"><b>HR Agentic AI</b>
+  <button role="tab" data-p="payroll-ui.html">Tính lương và review</button>
+  <button role="tab" data-p="policy-qa.html">Hỏi đáp chính sách</button>
+  <button role="tab" data-p="hr-agentic-ui.html">Agent và duyệt thay đổi</button>
+</header>
+<iframe id="f" title="Nội dung"></iframe>
+<script>
+const tabs=[...document.querySelectorAll('header button')],f=document.getElementById('f');
+function open(p){const t=tabs.find(b=>b.dataset.p===p)||tabs[0];tabs.forEach(b=>{b.classList.toggle('on',b===t);b.setAttribute('aria-selected',b===t)});if(!f.src.endsWith(t.dataset.p))f.src=t.dataset.p;try{localStorage.setItem('hr_tab',t.dataset.p)}catch{}}
+tabs.forEach(b=>b.onclick=()=>open(b.dataset.p));
+let last=null;try{last=localStorage.getItem('hr_tab')}catch{}
+open(last);
+</script>
+</body>
+</html>

@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HR Agentic AI – Bảng duyệt</title>
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#eef1ee;--surf:#fff;--ink:#14231f;--mut:#5d6b66;--line:#d5dcd8;--acc:#0f6b5c;--onacc:#fff;--acc2:#e3f1ee;--warn:#8a5610;--warnbg:#fbf0dc;--bad:#b3261e;--badbg:#fbe4e2;--ok:#1d6b3a;--okbg:#e0f2e6;--r:8px}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1715;--surf:#17211e;--ink:#e6eeea;--mut:#9aaba5;--line:#2b3a36;--acc:#4fc3ad;--onacc:#07211c;--acc2:#16322d;--warn:#e7b25c;--warnbg:#35290f;--bad:#f2867f;--badbg:#3a1a18;--ok:#76d49a;--okbg:#143322}}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{font:15px/1.55 "Be Vietnam Pro",system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--ink)}
+button,input,select,textarea{font:inherit;color:inherit}
+.app{display:grid;grid-template-columns:240px 1fr;min-height:100%}
+nav{background:var(--surf);border-right:1px solid var(--line);padding:20px 14px;display:flex;flex-direction:column;gap:6px;position:sticky;top:0;height:100vh}
+nav h1{font-size:17px;margin:0 8px 2px;font-weight:700}
+nav small{color:var(--mut);margin:0 8px 14px;display:block;font-size:12.5px}
+nav button{text-align:left;background:none;border:0;padding:10px 12px;border-radius:var(--r);cursor:pointer;font-weight:500}
+nav button:hover{background:var(--acc2)}
+nav button.on{background:var(--acc);color:var(--onacc)}
+.conn{margin-top:auto;font-size:12.5px;color:var(--mut);padding:8px;border-top:1px solid var(--line)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--warn);margin-right:6px}
+.dot.live{background:var(--ok)}
+main{padding:26px 30px 60px;max-width:1180px;width:100%}
+h2{margin:0 0 4px;font-size:22px}
+.sub{color:var(--mut);margin:0 0 20px}
+.card{background:var(--surf);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;margin-bottom:14px}
+.card h3{margin:0 0 10px;font-size:15px}
+.cols{display:grid;grid-template-columns:270px 1fr;gap:16px;align-items:start}
+.list .item{display:block;width:100%;text-align:left;background:var(--surf);border:1px solid var(--line);border-radius:var(--r);padding:10px 12px;margin-bottom:8px;cursor:pointer}
+.list .item.on{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}
+.list .item b{display:block;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.list .item span{font-size:12px;color:var(--mut)}
+label{display:block;font-size:13px;font-weight:600;margin:10px 0 4px}
+input,select,textarea{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:var(--r);background:var(--bg)}
+textarea{min-height:84px;resize:vertical}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.btn{background:var(--acc);color:var(--onacc);border:0;border-radius:var(--r);padding:9px 16px;font-weight:600;cursor:pointer}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.ghost{background:none;color:var(--ink);border:1px solid var(--line)}
+.btn.bad{background:var(--bad);color:#fff}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}
+.badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:600;background:var(--acc2);color:var(--acc)}
+.badge.warn{background:var(--warnbg);color:var(--warn)}.badge.bad{background:var(--badbg);color:var(--bad)}.badge.ok{background:var(--okbg);color:var(--ok)}
+.steps{display:flex;gap:6px;margin:12px 0 4px;flex-wrap:wrap}
+.steps div{flex:1;min-width:90px;padding:7px 10px;border-radius:var(--r);background:var(--bg);font-size:12.5px;color:var(--mut);border:1px solid var(--line)}
+.steps div.done{background:var(--acc2);color:var(--acc);border-color:transparent}
+.steps div.cur{background:var(--acc);color:var(--onacc);border-color:transparent;font-weight:600}
+.steps div.stop{background:var(--badbg);color:var(--bad);border-color:transparent;font-weight:600}
+.chat{max-height:340px;overflow:auto;display:flex;flex-direction:column;gap:8px;padding:2px}
+.msg{padding:9px 12px;border-radius:12px;max-width:85%;white-space:pre-wrap}
+.msg.user{align-self:flex-end;background:var(--acc);color:var(--onacc)}
+.msg.assistant{align-self:flex-start;background:var(--bg);border:1px solid var(--line)}
+.empty{color:var(--mut);padding:18px;text-align:center;border:1px dashed var(--line);border-radius:var(--r)}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{font-weight:600;color:var(--mut);font-size:12.5px}
+.kv{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:13.5px}
+.kv dt{color:var(--mut)}.kv dd{margin:0;word-break:break-word}
+.kv .nest{padding-left:12px;border-left:2px solid var(--line)}
+.old{color:var(--bad);text-decoration:line-through}.new{color:var(--ok);font-weight:600}
+.note{background:var(--warnbg);color:var(--warn);padding:10px 12px;border-radius:var(--r);font-size:13.5px;margin-bottom:12px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.hd{display:flex;justify-content:space-between;gap:12px;align-items:start;flex-wrap:wrap}
+#toast{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:9}
+#toast div{background:var(--ink);color:var(--bg);padding:10px 14px;border-radius:var(--r);max-width:360px;font-size:13.5px}
+#toast div.bad{background:var(--bad);color:#fff}
+@media(max-width:860px){.app{grid-template-columns:1fr}nav{position:static;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center}nav small,.conn{display:none}main{padding:18px 14px 50px}.cols,.grid2{grid-template-columns:1fr}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="app">
+  <nav>
+    <h1>HR Agentic AI</h1><small>Bảng duyệt chính sách và kế hoạch</small>
+    <button data-v="cases">Yêu cầu của agent</button>
+    <button data-v="changes">Duyệt thay đổi chính sách</button>
+    <button data-v="settings">Kết nối</button>
+    <div class="conn" id="conn"></div>
+  </nav>
+  <main id="main"></main>
+</div>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const LS={get(k,d){try{const v=JSON.parse(localStorage.getItem(k));return v??d}catch{return d}},set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch{}}};
+const WEB=location.protocol.startsWith('http');
+let S=Object.assign({base:WEB?location.origin:'http://localhost:8000',user:'hr.user',role:'reviewer',demo:!WEB},LS.get('cfg',{}));
+let D=LS.get('data',{cases:{},order:[]});
+let V={view:'cases',cur:null,cs:null,csId:'cs-demo',busy:false};
+const save=()=>{LS.set('cfg',S);LS.set('data',D)};
+const fmt=d=>d?new Date(d).toLocaleString('vi-VN'):'';
+
+function toast(m,bad){const e=document.createElement('div');e.textContent=m;if(bad)e.className='bad';$('#toast').append(e);setTimeout(()=>e.remove(),bad?7000:3500)}
+async function run(fn){if(V.busy)return;V.busy=true;try{await fn()}catch(e){toast(e.message||String(e),true)}finally{V.busy=false;render()}}
+
+/* ---------- API ---------- */
+async function api(m,p,b){
+  if(S.demo)return mock(m,p,b);
+  const h={'Content-Type':'application/json','X-User-Id':S.user,'X-User-Role':S.role};
+  let r;
+  try{r=await fetch(S.base.replace(/\/$/,'')+p,{method:m,headers:h,body:b?JSON.stringify(b):undefined})}
+  catch{throw new Error('Không kết nối được '+S.base+'. Kiểm tra backend đang chạy và đã bật CORS (xem tab Kết nối).')}
+  let d=null;try{d=await r.json()}catch{}
+  if(!r.ok){const t=d&&d.detail;throw new Error(typeof t==='string'?t:t?JSON.stringify(t):r.status+' '+r.statusText)}
+  return d;
+}
+
+/* ---------- Demo backend (chạy trong trình duyệt) ---------- */
+const M={cases:{},cs:null};
+const pub=c=>{const{_n,plan,run,...x}=c;return x};
+function mock(m,p,b){return new Promise((ok,no)=>setTimeout(()=>{try{ok(mockSync(m,p,b))}catch(e){no(e)}},300))}
+function mockSync(m,p,b){
+  let x;const now=new Date().toISOString();
+  if(m==='POST'&&p==='/cases'){const id='case-'+Math.random().toString(16).slice(2,10);const c={case_id:id,changeset_id:b.changeset_id||'changeset-pending-'+id.slice(5),requester_id:b.requester_id,brief:b.brief,status:'RECEIVED',approved_plan_version:null,created_at:now,updated_at:now,_n:0};M.cases[id]=c;return pub(c)}
+  if(x=p.match(/^\/cases\/([^/]+)(\/.*)?$/)){
+    const c=M.cases[x[1]]; const s=x[2]||'';
+    if(!c&&!p.includes('/runs/'))throw new Error('Không tìm thấy yêu cầu (demo chỉ nhớ trong phiên hiện tại).');
+    if(m==='GET'&&!s)return pub(c);
+    if(s==='/messages'){if(c.status!=='RECEIVED')throw new Error('Chỉ nhận tin nhắn khi yêu cầu ở trạng thái RECEIVED');c._n++;
+      if(c._n<2)return{decision:{decision:'ask_question',message:'Bạn muốn áp dụng thay đổi từ kỳ lương nào, và cho nhóm nhân viên nào?'},plan:null,case:pub(c)};
+      c.status='REVIEW';c.plan={plan_id:'plan-'+c.case_id.slice(5),version:1,proposal:{goal:c.brief,steps:[{id:'s1',title:'Đọc chính sách mới',detail:'Parse DOCX/PDF và chia chunk theo heading'},{id:'s2',title:'Trích công thức',detail:'Tạo FormulaCandidate và kiểm tra bằng validator'},{id:'s3',title:'Mô phỏng tác động',detail:'Chạy payroll thử trên dữ liệu kỳ trước'},{id:'s4',title:'Tạo ChangeSet',detail:'Gửi cho người duyệt trước khi cập nhật Excel'}],risk:'HIGH'}};
+      return{decision:{decision:'present_plan',message:'Mình đã soạn kế hoạch, vui lòng xem và duyệt.'},plan:c.plan,case:pub(c)}}
+    if(s==='/plan-decision'){if(c.status!=='REVIEW')throw new Error('Yêu cầu chưa có kế hoạch để duyệt');if(!b.approved&&!b.note.trim())throw new Error('Từ chối kế hoạch cần ghi chú');c.status=b.approved?'APPROVED':'REJECTED';if(b.approved)c.approved_plan_version=1;return{case:pub(c),plan_id:c.plan.plan_id,plan_status:b.approved?'APPROVED':'REJECTED'}}
+    if(s==='/runs'){if(c.status!=='APPROVED')throw new Error('Chỉ chạy được khi kế hoạch đã được duyệt');c.run={run_id:'run-'+Math.random().toString(16).slice(2,8),case_id:c.case_id,plan_id:c.plan.plan_id,status:'RUNNING',max_steps:b.max_steps};return c.run}
+    if(s==='/token-report')return{case_id:c.case_id,total_input_tokens:2140,total_output_tokens:960,total_tokens:3100,tool_calls:4,by_phase:[{phase:'conversation',total_tokens:820},{phase:'plan',total_tokens:2280}]};
+  }
+  if(m==='POST'&&(x=p.match(/^\/cases\/runs\/([^/]+)\/finish$/))){const c=Object.values(M.cases).find(c=>c.run&&c.run.run_id===x[1]);if(!c)throw new Error('Không tìm thấy lần chạy');c.run.status=b.status;c.run.stop_reason=b.stop_reason;if(b.status==='COMPLETED')c.status='DONE';return{run_id:x[1],status:b.status,stop_reason:b.stop_reason}}
+  if(x=p.match(/^\/changesets\/([^/]+)(\/review)?$/)){
+    M.cs=M.cs||{id:'cs-demo',company_id:'acme-vn',status:'READY_FOR_REVIEW',risk_level:'CRITICAL',effective_from:'2026-11-01',scope:'Toàn công ty',items:[
+      {id:'i1',category:'PARAMETER_CHANGE',field_path:'allowances.meal',old_value:730000,proposed_value:900000,reason:'Quy chế 2026 nâng phụ cấp ăn trưa',evidence_refs:['qc-2026 §4.2'],review_status:'pending',scope:'Toàn công ty',effective_date:'2026-11-01',confidence:0.96,clarifying_question:null},
+      {id:'i2',category:'FORMULA_CHANGE',field_path:'rules.overtime_pay',old_value:'hourly*1.5*ot_hours',proposed_value:'hourly*1.5*ot_hours + night_bonus',reason:'Bổ sung phụ cấp làm đêm vào tiền tăng ca',evidence_refs:['qc-2026 §6.1'],review_status:'pending',scope:'Khối vận hành',effective_date:'2026-11-01',confidence:0.78,clarifying_question:null},
+      {id:'i3',category:'REGULATORY_REFERENCE',field_path:'tax.bracket_vn',old_value:'Biểu thuế 2020',proposed_value:'Biểu thuế mới',reason:'Dẫn chiếu quy định thuế TNCN mới',evidence_refs:['qc-2026 §9'],review_status:'needs_clarification',scope:null,effective_date:null,confidence:0.52,clarifying_question:'Biểu thuế mới áp dụng từ ngày nào?'},
+      {id:'i4',category:'EDITORIAL',field_path:'doc.title',old_value:'Quy chế lương 2025',proposed_value:'Quy chế lương 2026',reason:'Đổi tiêu đề',evidence_refs:[],review_status:'accepted',scope:null,effective_date:null,confidence:0.99,clarifying_question:null}]};
+    if(x[1]!=='cs-demo')throw new Error('ChangeSet not found (demo chỉ có mã cs-demo)');
+    if(!x[2])return M.cs;
+    if(b.decision==='REJECT'&&!b.note.trim())throw new Error('Quyết định REJECT cần ghi chú');
+    if(b.decision==='APPROVE'&&S.role!=='approver')throw new Error('Vai trò '+S.role+' không được phép duyệt (cần approver)');
+    M.cs.status={APPROVE:'APPROVED',REJECT:'REJECTED',REQUEST_CHANGES:'NEEDS_CLARIFICATION'}[b.decision];return M.cs;
+  }
+  throw new Error('Demo chưa hỗ trợ '+m+' '+p);
+}
+
+/* ---------- Helpers hiển thị ---------- */
+const CS_STATUS={RECEIVED:['Đã nhận',''],REVIEW:['Chờ duyệt kế hoạch','warn'],APPROVED:['Đã duyệt','ok'],REJECTED:['Bị từ chối','bad'],DONE:['Hoàn tất','ok']};
+const badge=(t,c='')=>`<span class="badge ${c}">${esc(t)}</span>`;
+const riskC=r=>({LOW:'ok',MEDIUM:'',HIGH:'warn',CRITICAL:'bad'}[r]||'');
+const statC=s=>/APPROVED|COMPLETED|DONE/.test(s)?'ok':/REJECT|FAILED|ROLLED/.test(s)?'bad':/CLARIF|REVIEW|DRAFT/.test(s)?'warn':'';
+function val(v){if(v===null||v===undefined||v==='')return '<span style="color:var(--mut)">—</span>';if(typeof v==='object')return `<code>${esc(JSON.stringify(v))}</code>`;return esc(v)}
+function kv(o){
+  if(Array.isArray(o)){
+    if(o.length&&o.every(i=>i&&typeof i==='object'&&!Array.isArray(i))){const ks=[...new Set(o.flatMap(Object.keys))];return `<div class="scroll"><table><tr>${ks.map(k=>`<th>${esc(k)}</th>`).join('')}</tr>${o.map(r=>`<tr>${ks.map(k=>`<td>${val(r[k])}</td>`).join('')}</tr>`).join('')}</table></div>`}
+    return o.map(val).join(', ')||val(null);
+  }
+  if(o&&typeof o==='object')return `<dl class="kv">${Object.entries(o).map(([k,v])=>`<dt>${esc(k)}</dt><dd>${v&&typeof v==='object'?`<div class="nest">${kv(v)}</div>`:val(v)}</dd>`).join('')}</dl>`;
+  return val(o);
+}
+const cc=()=>D.cases[V.cur];
+
+/* ---------- Màn hình: Yêu cầu của agent ---------- */
+function viewCases(){
+  const list=D.order.map(id=>{const c=D.cases[id];return `<button class="item ${id===V.cur?'on':''}" data-case="${id}"><b>${esc(c.info.brief)}</b><span>${esc(CS_STATUS[c.info.status]?.[0]||c.info.status)} · ${esc(id)}</span></button>`}).join('')||'<div class="empty">Chưa có yêu cầu nào.</div>';
+  return `<h2>Yêu cầu của agent</h2><p class="sub">Trao đổi với agent, duyệt kế hoạch, rồi cho phép chạy. Agent không tự chạy khi kế hoạch chưa được duyệt.</p>
+  <div class="cols"><div class="list"><button class="btn" style="width:100%;margin-bottom:10px" data-act="newcase">Tạo yêu cầu mới</button>${list}
+  <div class="row"><input id="openid" placeholder="Mở theo case_id"><button class="btn ghost" data-act="opencase">Mở</button></div></div>
+  <div>${V.cur&&cc()?caseDetail():caseForm()}</div></div>`;
+}
+function caseForm(){return `<div class="card"><h3>Yêu cầu mới</h3>
+  <label for="f-req">Người yêu cầu</label><input id="f-req" value="${esc(S.user)}">
+  <label for="f-brief">Bạn muốn agent làm gì?</label><textarea id="f-brief" placeholder="Ví dụ: Cập nhật phụ cấp ăn trưa theo quy chế lương 2026 và mô phỏng tác động lên kỳ lương tháng 11."></textarea>
+  <label for="f-cs">Mã ChangeSet (không bắt buộc)</label><input id="f-cs" placeholder="Để trống nếu chưa có">
+  <div class="row"><button class="btn" data-act="create">Tạo yêu cầu</button></div></div>`}
+function caseDetail(){
+  const c=cc(),i=c.info,st=i.status,flow=['RECEIVED','REVIEW','APPROVED','DONE'];
+  const idx=flow.indexOf(st);
+  const stepper=flow.map((s,n)=>{let cl=n<idx?'done':n===idx?'cur':'';let t=CS_STATUS[s][0];if(st==='REJECTED'&&s==='APPROVED'){cl='stop';t='Bị từ chối'}return `<div class="${cl}">${esc(t)}</div>`}).join('');
+  const msgs=c.msgs.map(m=>`<div class="msg ${m.role}">${esc(m.content)}</div>`).join('')||'<div class="empty">Mô tả yêu cầu của bạn để agent bắt đầu.</div>';
+  let planCard='';
+  if(c.plan){
+    planCard=`<div class="card"><div class="hd"><h3>Kế hoạch đề xuất (phiên bản ${esc(c.plan.version)})</h3>${badge(st==='REVIEW'?'Chờ bạn duyệt':CS_STATUS[st]?.[0]||st,st==='REVIEW'?'warn':st==='REJECTED'?'bad':'ok')}</div>${kv(c.plan.proposal)}
+    ${st==='REVIEW'?`<label for="pn">Ghi chú (bắt buộc khi từ chối)</label><textarea id="pn"></textarea><div class="row"><button class="btn" data-act="plan-ok">Duyệt kế hoạch</button><button class="btn bad" data-act="plan-no">Từ chối</button></div>`:''}</div>`}
+  let runCard='';
+  if(st==='APPROVED'||st==='DONE'){
+    runCard=`<div class="card"><h3>Chạy kế hoạch</h3>`+(c.run?`${kv(c.run)}${st==='APPROVED'?`<div class="grid2"><div><label for="rs">Kết quả</label><select id="rs"><option>COMPLETED</option><option>NEEDS_REVIEW</option><option>FAILED</option></select></div><div><label for="rr">Lý do dừng (không bắt buộc)</label><input id="rr"></div></div><div class="row"><button class="btn" data-act="finish">Kết thúc lần chạy</button></div>`:''}`
+      :`<label for="ms">Số bước tối đa (1–50)</label><input id="ms" type="number" min="1" max="50" value="10" style="max-width:120px"><div class="row"><button class="btn" data-act="start">Bắt đầu chạy</button></div>`)+`</div>`}
+  return `<div class="card"><div class="hd"><div><h3 style="margin:0">${esc(i.brief)}</h3><div style="color:var(--mut);font-size:13px">${esc(i.case_id)} · ${esc(i.changeset_id)} · tạo ${esc(fmt(i.created_at))}</div></div>${badge(CS_STATUS[st]?.[0]||st,statC(st))}</div><div class="steps">${stepper}</div>
+  <div class="row"><button class="btn ghost" data-act="refresh">Làm mới trạng thái</button></div></div>
+  <div class="card"><h3>Trao đổi với agent</h3><div class="chat" id="chat">${msgs}</div>
+  ${st==='RECEIVED'?`<label for="cm">Tin nhắn</label><textarea id="cm" placeholder="Nhập nội dung rồi gửi"></textarea><div class="row"><button class="btn" data-act="send">Gửi</button></div>`:`<p class="sub" style="margin:12px 0 0">Cuộc trao đổi đã khép lại vì yêu cầu không còn ở trạng thái RECEIVED.</p>`}</div>
+  ${planCard}${runCard}
+  <div class="card"><div class="hd"><h3>Chi phí token</h3><button class="btn ghost" data-act="tokens">Tải báo cáo</button></div>${c.report?kv(c.report):'<span style="color:var(--mut)">Chưa tải báo cáo.</span>'}</div>`;
+}
+
+/* ---------- Màn hình: Duyệt thay đổi ---------- */
+function viewChanges(){
+  const cs=V.cs;
+  let body='<div class="empty">Nhập mã ChangeSet để xem các thay đổi chờ duyệt.</div>';
+  if(cs){
+    const rows=cs.items.map(it=>`<tr><td>${badge(it.category,it.category==='EDITORIAL'?'ok':/FORMULA|AMBIG/.test(it.category)?'warn':'')}<div style="font-size:12.5px;color:var(--mut);margin-top:4px">${esc(it.field_path)}</div></td>
+      <td><div class="old">${val(it.old_value)}</div><div class="new">${val(it.proposed_value)}</div></td>
+      <td>${esc(it.reason)}${it.clarifying_question?`<div class="note" style="margin:6px 0 0">Câu hỏi: ${esc(it.clarifying_question)}</div>`:''}<div style="font-size:12.5px;color:var(--mut)">${it.evidence_refs.length?'Nguồn: '+esc(it.evidence_refs.join('; ')):'Không có trích dẫn'}</div></td>
+      <td>${esc(it.scope||'—')}<div style="font-size:12.5px;color:var(--mut)">${esc(it.effective_date||'')}</div></td>
+      <td>${Math.round(it.confidence*100)}%<div>${badge(it.review_status,statC(it.review_status))}</div></td></tr>`).join('');
+    body=`<div class="card"><div class="hd"><div><h3 style="margin:0">${esc(cs.id)} · ${esc(cs.company_id)}</h3><div style="color:var(--mut);font-size:13px">Hiệu lực từ ${esc(cs.effective_from)} · Phạm vi: ${esc(cs.scope||'—')}</div></div><div>${badge(cs.status,statC(cs.status))} ${badge('Rủi ro '+cs.risk_level,riskC(cs.risk_level))}</div></div></div>
+    <div class="card scroll"><table><tr><th>Loại thay đổi</th><th>Giá trị cũ → mới</th><th>Lý do và nguồn</th><th>Phạm vi</th><th>Độ tin cậy</th></tr>${rows}</table></div>
+    <div class="card"><h3>Quyết định</h3>${cs.risk_level==='CRITICAL'?'<div class="note">Mức CRITICAL cần hai người duyệt (chủ payroll và chủ chính sách HR). Bạn đang đăng nhập với vai trò <b>'+esc(S.role)+'</b>; chỉ <b>approver</b> mới được duyệt.</div>':''}
+    <label for="rn">Ghi chú (bắt buộc khi từ chối)</label><textarea id="rn"></textarea>
+    <div class="row"><button class="btn" data-act="cs-APPROVE">Duyệt</button><button class="btn ghost" data-act="cs-REQUEST_CHANGES">Yêu cầu chỉnh sửa</button><button class="btn bad" data-act="cs-REJECT">Từ chối</button></div></div>`;
+  }
+  return `<h2>Duyệt thay đổi chính sách</h2><p class="sub">Xem từng thay đổi mà hệ thống trích từ tài liệu và quyết định trước khi cập nhật công thức hoặc Excel.</p>
+  <div class="card"><div class="row" style="margin-top:0"><input id="csid" style="flex:1;min-width:200px" placeholder="Mã ChangeSet" value="${esc(V.csId)}"><button class="btn" data-act="cs-load">Tải ChangeSet</button></div></div>${body}`;
+}
+
+/* ---------- Màn hình: Kết nối ---------- */
+function viewSettings(){return `<h2>Kết nối</h2><p class="sub">Chọn dùng dữ liệu demo hoặc nối với backend FastAPI của dự án.</p>
+  <div class="card"><label style="display:flex;gap:10px;align-items:center;margin:0"><input type="checkbox" id="s-demo" style="width:auto" ${S.demo?'checked':''}> Chế độ demo (không cần backend)</label>
+  <label for="s-base">Địa chỉ API</label><input id="s-base" value="${esc(S.base)}">
+  <div class="grid2"><div><label for="s-user">User ID (header X-User-Id)</label><input id="s-user" value="${esc(S.user)}"></div>
+  <div><label for="s-role">Vai trò (header X-User-Role)</label><select id="s-role">${['analyst','reviewer','approver'].map(r=>`<option ${S.role===r?'selected':''}>${r}</option>`).join('')}</select></div></div>
+  <div class="row"><button class="btn" data-act="save-set">Lưu</button></div></div>
+  <div class="card"><h3>Chạy backend</h3><p style="margin-top:0">Từ thư mục dự án:</p><pre style="background:var(--bg);padding:10px;border-radius:var(--r);overflow:auto">uvicorn api:app --app-dir src --reload</pre>
+  <p>Mở file này trực tiếp (file://) cần bật CORS trong <code>src/api.py</code>:</p>
+  <pre style="background:var(--bg);padding:10px;border-radius:var(--r);overflow:auto">from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(CORSMiddleware, allow_origins=["*"],
+                   allow_methods=["*"], allow_headers=["*"])</pre>
+  <p style="margin-bottom:0;color:var(--mut)">Khi triển khai thật, thay <code>"*"</code> bằng địa chỉ cụ thể của giao diện.</p></div>`}
+
+/* ---------- Hành động ---------- */
+const A={
+  newcase(){V.cur=null},
+  async opencase(){const id=$('#openid').value.trim();if(!id)return;const info=await api('GET','/cases/'+id);addCase(info);V.cur=id},
+  async create(){const info=await api('POST','/cases',{requester_id:$('#f-req').value.trim(),brief:$('#f-brief').value.trim(),changeset_id:$('#f-cs').value.trim()||null});addCase(info);V.cur=info.case_id;toast('Đã tạo yêu cầu')},
+  async refresh(){cc().info=await api('GET','/cases/'+V.cur)},
+  async send(){const t=$('#cm').value.trim();if(!t)return;const c=cc();c.msgs.push({role:'user',content:t});render();
+    try{const r=await api('POST',`/cases/${V.cur}/messages`,{content:t});c.msgs.push({role:'assistant',content:r.decision.message});c.info=r.case;if(r.plan){c.plan=r.plan;toast('Agent đã trình kế hoạch để duyệt')}}
+    catch(e){c.msgs.pop();throw e}},
+  async 'plan-ok'(){const r=await api('POST',`/cases/${V.cur}/plan-decision`,{approved:true,note:$('#pn').value});cc().info=r.case;toast('Đã duyệt kế hoạch')},
+  async 'plan-no'(){const r=await api('POST',`/cases/${V.cur}/plan-decision`,{approved:false,note:$('#pn').value});cc().info=r.case;toast('Đã từ chối kế hoạch')},
+  async start(){cc().run=await api('POST',`/cases/${V.cur}/runs`,{max_steps:+$('#ms').value||10});toast('Đã bắt đầu chạy')},
+  async finish(){const c=cc();const r=await api('POST',`/cases/runs/${c.run.run_id}/finish`,{status:$('#rs').value,completed_step_ids:[],stop_reason:$('#rr').value.trim()||null});c.run={...c.run,...r};c.info=await api('GET','/cases/'+V.cur);toast('Đã kết thúc lần chạy')},
+  async tokens(){cc().report=await api('GET',`/cases/${V.cur}/token-report`)},
+  async 'cs-load'(){V.csId=$('#csid').value.trim();V.cs=await api('GET','/changesets/'+V.csId)},
+  async 'save-set'(){S={base:$('#s-base').value.trim(),user:$('#s-user').value.trim()||'hr.user',role:$('#s-role').value,demo:$('#s-demo').checked};toast('Đã lưu kết nối')}
+};
+for(const d of['APPROVE','REJECT','REQUEST_CHANGES'])A['cs-'+d]=async()=>{V.cs=await api('POST',`/changesets/${V.csId}/review`,{decision:d,note:$('#rn').value});toast('Đã ghi nhận quyết định: '+d)};
+function addCase(info){if(!D.cases[info.case_id]){D.cases[info.case_id]={info,msgs:[],plan:null,run:null,report:null};D.order.unshift(info.case_id)}else D.cases[info.case_id].info=info}
+
+/* ---------- Khung chính ---------- */
+function render(){
+  save();
+  document.querySelectorAll('nav [data-v]').forEach(b=>b.classList.toggle('on',b.dataset.v===V.view));
+  $('#conn').innerHTML=`<span class="dot ${S.demo?'':'live'}"></span>${S.demo?'Chế độ demo':esc(S.base)}<br>${esc(S.user)} · ${esc(S.role)}`;
+  const keep=document.activeElement&&document.activeElement.id;
+  $('#main').innerHTML=V.view==='cases'?viewCases():V.view==='changes'?viewChanges():viewSettings();
+  const ch=$('#chat');if(ch)ch.scrollTop=ch.scrollHeight;
+}
+document.addEventListener('click',e=>{
+  const n=e.target.closest('[data-v]');if(n){V.view=n.dataset.v;render();return}
+  const c=e.target.closest('[data-case]');if(c){V.cur=c.dataset.case;render();return}
+  const a=e.target.closest('[data-act]');if(a&&A[a.dataset.act])run(A[a.dataset.act]);
+});
+render();
+</script>
+</body>
+</html>
