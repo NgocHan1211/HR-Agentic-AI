@@ -24,6 +24,7 @@ from payroll.formula.direct_editor import DirectFormulaEditError, apply_direct_f
 from payroll.ingestion import SheetMappingSpec, normalize_attendance, normalize_salary_schema, read_payroll_sheet, validate_ingested_data
 from policy_update.parsers.base_parser import DocumentRole, ParseRequest, Persistence, SourceRef
 from policy_update.parsers.parser_factory import ParserFactory
+from policy_update.rag import retrieve_payroll_context
 
 
 st.set_page_config(page_title="Tính lương từ chính sách", layout="wide")
@@ -51,20 +52,11 @@ def parse_policy(uploaded: Any) -> tuple[str, list[str], list[dict[str, Any]]]:
         language_hint="vie+eng",
     )
     parsed = ParserFactory.create(request).parse(request)
-    evidence = [
-        {
-            "block_id": block.block_id,
-            "page": block.location.page,
-            "section_path": block.location.section_path,
-            "text": block.normalized_text[:400],
-        }
-        for block in parsed.blocks
-        if block.normalized_text
-    ]
+    retrieval = retrieve_payroll_context(parsed, top_k=6, max_characters=9_000)
     return (
-        "\n".join(block.normalized_text for block in parsed.blocks if block.normalized_text),
+        retrieval.text,
         [warning.message for warning in parsed.warnings],
-        evidence,
+        retrieval.evidence,
     )
 
 
@@ -296,10 +288,11 @@ policy_file = st.file_uploader("Upload PDF chính sách", type=["pdf"])
 
 if policy_file and st.button("Đọc PDF và tạo bảng công thức", type="primary"):
     try:
-        text, warnings, evidence = parse_policy(policy_file)
-        if not text.strip():
-            raise ValueError("Không đọc được văn bản từ PDF. Với PDF scan, hãy kiểm tra OCR.")
-        set_formula_candidate(extract_formula(text, company_id, evidence))
+        with st.spinner("Đang đọc PDF và gọi AI tạo FormulaSpec..."):
+            text, warnings, evidence = parse_policy(policy_file)
+            if not text.strip():
+                raise ValueError("Không đọc được văn bản từ PDF. Với PDF scan, hãy kiểm tra OCR.")
+            set_formula_candidate(extract_formula(text, company_id, evidence))
         st.session_state.policy_text = text
         st.session_state.policy_evidence = evidence
         st.session_state.formula_feedback = []

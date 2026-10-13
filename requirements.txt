@@ -15,3 +15,7 @@ uvicorn[standard]
 
 # Tests
 pytest
+
+pdfplumber
+pytesseract
+Pillow
